@@ -146,8 +146,25 @@
   function status(message,error=false){const el=document.querySelector("#lfmc-status");if(el){el.textContent=message;el.dataset.error=error?"1":"0";}}
 
   const css=`
-  #lfmc-launch{position:relative;display:flex;align-items:center;justify-content:center;width:36px;height:36px;margin:0 6px;border:0;border-radius:50%;background:transparent;color:var(--spice-subtext);cursor:pointer;font-size:18px}
-  #lfmc-launch:hover{background:var(--spice-card);color:var(--spice-text)}
+  #lfmc-launch{
+  position:relative;
+  display:flex;
+  flex:0 0 40px;
+  align-items:center;
+  justify-content:center;
+  width:40px;
+  min-width:40px;
+  height:40px;
+  padding:0;
+  margin:0 10px;
+  box-sizing:border-box;
+  border:0;
+  border-radius:50%;
+  background:transparent;
+  color:var(--spice-subtext);
+  cursor:pointer;
+  font-size:20px;
+}
   #lfmc-overlay{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:3vh 3vw;font-family:var(--font-family,Arial,sans-serif)}
   #lfmc-panel{width:min(920px,96vw);height:min(690px,92vh);min-height:470px;background:#151515;color:#f5f5f5;border:1px solid #343434;border-radius:18px;box-shadow:0 24px 90px #000a;overflow:hidden;display:flex;flex-direction:column}
   #lfmc-panel *{box-sizing:border-box} .lfmc-head{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid #303030;background:linear-gradient(120deg,#241b20,#171717 55%)}
