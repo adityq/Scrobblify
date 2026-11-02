@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="assets/scrobblify-logo.png" width="180" alt="Scrobblify Logo">
+</p>
+
+<h1 align="center">Scrobblify</h1>
+
 # Scrobblify for Spicetify
 
 **One player. Two music histories.**
