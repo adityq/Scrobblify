@@ -126,6 +126,8 @@ The extension has been syntax-checked, but has not yet been fully exercised acro
   An independent project driven by curiosity and a love for music.
 
   <br>
+  
+  ---
 
   **Made by a fellow Indian, for music lovers everywhere. 🇮🇳🎧**
 
