@@ -1,108 +1,122 @@
-<p align="center">
-  <img src="assets/scrobblify-logo.png" width="180" alt="Scrobblify Logo">
-</p>
+ <div align="center">
 
-<h1 align="center">Scrobblify</h1>
+  <img src="assets/scrobblify-logo.png" width="132" alt="Scrobblify logo">
 
-# Scrobblify for Spicetify
+  # Scrobblify
 
-**One player. Two music histories.**
+  **One player. Two music histories.**
 
-Scrobblify is a local-first Spicetify extension for Spotify desktop on Windows. It sends Spotify listening activity to Last.fm and ListenBrainz independently, with separate credentials, enable switches, and retry queues.
+  A local-first Spotify scrobbler for Spicetify.
+
+  [Features](#features) · [Installation](#installation) · [Setup](#connect-your-services) · [Privacy](#privacy)
+
+  ![Platform](https://img.shields.io/badge/platform-Windows-242424?style=flat-square)
+  ![Spicetify](https://img.shields.io/badge/works%20with-Spicetify-1DB954?style=flat-square)
+  ![License](https://img.shields.io/badge/license-MIT-orange?style=flat-square)
+
+</div>
+
+---
+
+## What is Scrobblify?
+
+Scrobblify is a **Spicetify extension for Spotify desktop on Windows** that sends your listening activity to **Last.fm** and **ListenBrainz** independently.
+
+Connect either service or both. Each has its own credentials, controls, connection status, and retry queue. Your listening data is sent directly from Spotify to the services — no Scrobblify server in the middle.
 
 ## Features
 
-### Shared playback engine
-- Detects Spotify track changes and playback state.
-- Sends Now Playing updates to both services.
-- Scrobbles after the configured threshold (default: the shorter of 50% of track duration or 4 minutes; tracks under 30 seconds are ignored).
-- Independent per-service duplicate guards and offline retry queues.
-- Spotify track URL and duration metadata included in ListenBrainz submissions.
+| | Feature | What it does |
+|:--:|---|---|
+| ↗ | **Dual scrobbling** | Send listening activity to Last.fm and ListenBrainz independently |
+| ♪ | **Now Playing** | Update both services when your track changes |
+| ◷ | **Listening history** | Browse recent listening activity |
+| ▥ | **Charts & stats** | Explore top tracks, artists, albums, recordings, and releases |
+| ♥ | **Track feedback** | Love tracks on Last.fm; send love/hate feedback on ListenBrainz when supported |
+| ⇄ | **Offline retry** | Queue submissions for retry, with per-service duplicate protection |
+| ⚙ | **Independent controls** | Configure each service separately from the dashboard |
 
-### Last.fm
-- Desktop token authorization flow.
-- Now Playing and automatic scrobbling.
-- Love and un-love current track.
-- Recent listening history.
-- Top tracks, artists, and albums across available Last.fm periods.
+## Dashboard
 
-### ListenBrainz
-- Personal user-token validation and connection.
-- Now Playing and automatic listen submission.
-- Love, un-love (clear feedback), and hate current track.
-- Recent listening history.
-- Top recordings, artists, and releases across ListenBrainz statistics ranges.
-
-### Dashboard
-- Modern dark dashboard with Overview, History, Charts, and Settings.
-- Switch between Last.fm and ListenBrainz for history and charts.
-- Separate connection and queue status.
+- **Overview** — playback and connection status.
+- **History** — recent listening activity from either service.
+- **Charts** — listening statistics and top items.
+- **Settings** — credentials, service switches, and scrobbling preferences.
 
 ## Requirements
 
 - Spotify desktop for Windows
-- Spicetify CLI installed and applied
-- A Last.fm account and your own API key/shared secret (optional)
-- A ListenBrainz account and user token (optional)
+- [Spicetify CLI](https://spicetify.app/) installed and applied
+- A [Last.fm](https://www.last.fm/) account and API credentials (optional)
+- A [ListenBrainz](https://listenbrainz.org/) account and user token (optional)
 
-You can connect either service on its own, or both together.
-
-## Install on Windows
+## Installation
 
 1. Close Spotify.
-2. Copy `scrobblify.js` into:
-
-   `%appdata%\Spicetify\Extensions\`
-
-3. Open PowerShell or Command Prompt and run:
+2. Copy `scrobblify.js` into `%appdata%\Spicetify\Extensions\`.
+3. Run:
 
    ```powershell
    spicetify config extensions scrobblify.js
    spicetify apply
    ```
 
-4. Restart Spotify. Click the music-note button in the top bar to open Scrobblify.
-5. Open **Settings** and connect whichever services you use.
+4. Restart Spotify and click the Scrobblify music-note button.
+5. Open **Settings** and connect your preferred service.
 
-If you were using the earlier `lastfm-companion.js` build, replace that extension entry with `scrobblify.js` rather than enabling both. Existing Last.fm API credentials and session data are retained using the original local storage keys.
+## Connect your services
 
-## Connect Last.fm
+<details>
+<summary><strong>Last.fm</strong></summary>
 
-1. Create or view your API credentials at https://www.last.fm/api/account.
-2. In Scrobblify Settings, enter your API key, shared secret, and Last.fm username.
-3. Click **Connect Last.fm** and approve the app in your browser.
+1. Create API credentials at https://www.last.fm/api/account.
+2. Enter your API key, shared secret, and username in Scrobblify Settings.
+3. Click **Connect Last.fm** and approve the app.
 4. Return to Spotify and click **I've approved — finish connection**.
 
-## Connect ListenBrainz
+</details>
+
+<details>
+<summary><strong>ListenBrainz</strong></summary>
 
 1. Open https://listenbrainz.org/settings/ and copy your user token.
-2. Paste it into the ListenBrainz token field in Scrobblify Settings.
-3. Click **Validate & connect**. Scrobblify validates the token and reads the associated username.
+2. Paste it into Scrobblify Settings.
+3. Click **Validate & connect**.
 
-## Privacy and security
+</details>
 
-- Last.fm credentials/session key, ListenBrainz token, preferences, duplicate guards, and retry queues are stored in Spicetify local storage for the current Windows user.
-- Requests go directly from Spotify to `ws.audioscrobbler.com` and `api.listenbrainz.org`.
+## Privacy
+
+- Credentials, preferences, duplicate guards, and retry queues are stored in Spicetify local storage for the current Windows user.
+- Requests go directly from Spotify to Last.fm and ListenBrainz.
 - No companion server, analytics endpoint, telemetry, or third-party proxy is used.
-- Spicetify local storage is not a secure secret vault. Tokens and secrets are accessible to software running as your Windows user. Do not share your Spotify profile or extension storage with others.
-- Disconnect clears the locally stored credentials; revoke app access separately in the respective service settings if needed.
+- Spicetify local storage is not a secure secret vault. Tokens and secrets are accessible to software running as your Windows user.
+- Disconnect clears locally stored credentials. Revoke app access separately in each service's settings if needed.
 
-## Important scope notes
+## Notes & limitations
 
-Scrobblify implements the music-tracking and personal-listening features relevant to a Spotify scrobbler. It does **not** reproduce every feature of the full Last.fm or ListenBrainz websites/APIs (for example, social feeds, recommendations, playlist management, imports/exports, or account administration).
+Scrobblify focuses on music tracking and personal listening features. It does not reproduce every feature of the Last.fm or ListenBrainz websites/APIs.
 
-ListenBrainz requires a `recording_msid` or MusicBrainz recording ID for love/hate feedback. Scrobblify requests an MSID from the ListenBrainz Playing Now endpoint; feedback may be unavailable if the service does not return an identifier.
+ListenBrainz requires a `recording_msid` or MusicBrainz recording ID for love/hate feedback. Feedback may be unavailable if the service does not return an identifier.
 
-This extension has been syntax-checked, but it has not yet been exercised inside the user's Spotify installation or against their accounts. Spotify/Spicetify internal player metadata and browser request policies can change; inspect Spotify DevTools (`Ctrl` + `Shift` + `I`) if a live API request fails.
+The extension has been syntax-checked, but has not yet been fully exercised across all Spotify installations or account configurations.
 
-## Troubleshooting
+<details>
+<summary><strong>Troubleshooting</strong></summary>
 
-- **Button missing:** confirm `scrobblify.js` is in `%appdata%\Spicetify\Extensions\`, check `spicetify config extensions`, then run `spicetify apply`.
-- **Last.fm authorization/signature error:** confirm the API key and shared secret belong to the same API account and Windows date/time is correct.
-- **ListenBrainz token error:** generate/copy the personal token from ListenBrainz Settings and validate it again.
-- **Scrobbles not sending:** check the global Scrobbling switch and the ListenBrainz-specific switch, verify service connection status, and inspect Spotify DevTools for CORS/network/API errors.
-- **No ListenBrainz love/hate action:** restart the current track so ListenBrainz can return a recording MSID, then try again.
+- **Button missing:** confirm the extension is installed and run `spicetify apply`.
+- **Last.fm authorization error:** verify your API key and shared secret.
+- **ListenBrainz token error:** generate a new token in ListenBrainz Settings.
+- **Scrobbles not sending:** check the scrobbling switches and connection status. Inspect Spotify DevTools (`Ctrl` + `Shift` + `I`) for errors.
+
+</details>
 
 ## License
 
-MIT. See `LICENSE`.
+[MIT](LICENSE)
+
+---
+
+<div align="center">
+  Made for people who care about their listening history. 🧡
+</div>
