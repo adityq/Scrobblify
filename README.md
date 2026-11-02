@@ -4,7 +4,7 @@
 
   # Scrobblify
 
-  **One player. Two music histories.**
+  **Keep every beat of your journey.**
 
   A local-first Spotify scrobbler for Spicetify.
 
@@ -111,12 +111,32 @@ The extension has been syntax-checked, but has not yet been fully exercised acro
 
 </details>
 
+
 ## License
 
 [MIT](LICENSE)
 
 ---
 
-<div align="center">
-  Made for people who care about their listening history. 🧡
-</div>
+<table align="center" border="0">
+  <tr>
+    <td align="center" style="border: none;">
+      <strong><big>A little about Scrobblify 🤖</big></strong>
+    </td>
+  </tr>
+</table>
+
+<p align="center">
+  Scrobblify is a <strong>vibe-coded project</strong>, built with human ideas,
+  AI assistance, experimentation, debugging, and plenty of trial and error.
+</p>
+
+<p align="center">
+  An independent project driven by curiosity and a love for music.
+</p>
+
+<br>
+
+<p align="center">
+  <strong>Made by a fellow Indian, for music lovers everywhere. 🇮🇳🎧</strong>
+</p>
