@@ -146,17 +146,16 @@
   function status(message,error=false){const el=document.querySelector("#lfmc-status");if(el){el.textContent=message;el.dataset.error=error?"1":"0";}}
 
   const css=`
-  #lfmc-launch{
   #lfmc-launch {
   position: relative !important;
   display: inline-flex !important;
-  flex: 0 0 44px !important;
-  width: 44px !important;
-  min-width: 44px !important;
-  max-width: 44px !important;
+  flex: 0 0 40px !important;
+  width: 40px !important;
+  min-width: 40px !important;
+  max-width: 40px !important;
   height: 40px !important;
   padding: 0 !important;
-  margin: 0 14px !important;
+  margin: 0 8px !important;
   box-sizing: border-box !important;
   align-items: center !important;
   justify-content: center !important;
