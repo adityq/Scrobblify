@@ -147,23 +147,27 @@
 
   const css=`
   #lfmc-launch{
-  position:relative;
-  display:flex;
-  flex:0 0 40px;
-  align-items:center;
-  justify-content:center;
-  width:40px;
-  min-width:40px;
-  height:40px;
-  padding:0;
-  margin:0 10px;
-  box-sizing:border-box;
-  border:0;
-  border-radius:50%;
-  background:transparent;
-  color:var(--spice-subtext);
-  cursor:pointer;
-  font-size:20px;
+  #lfmc-launch {
+  position: relative !important;
+  display: inline-flex !important;
+  flex: 0 0 44px !important;
+  width: 44px !important;
+  min-width: 44px !important;
+  max-width: 44px !important;
+  height: 40px !important;
+  padding: 0 !important;
+  margin: 0 14px !important;
+  box-sizing: border-box !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border: 0 !important;
+  border-radius: 50% !important;
+  background: transparent !important;
+  color: var(--spice-subtext) !important;
+  font-size: 20px !important;
+  line-height: 1 !important;
+  cursor: pointer !important;
+  flex-shrink: 0 !important;
 }
   #lfmc-overlay{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:3vh 3vw;font-family:var(--font-family,Arial,sans-serif)}
   #lfmc-panel{width:min(920px,96vw);height:min(690px,92vh);min-height:470px;background:#151515;color:#f5f5f5;border:1px solid #343434;border-radius:18px;box-shadow:0 24px 90px #000a;overflow:hidden;display:flex;flex-direction:column}
