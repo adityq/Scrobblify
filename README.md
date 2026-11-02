@@ -137,6 +137,8 @@ The extension has been syntax-checked, but has not yet been fully exercised acro
 
 <br>
 
+---
+
 <p align="center">
   <strong>Made by a fellow Indian, for music lovers everywhere. 🇮🇳🎧</strong>
 </p>
