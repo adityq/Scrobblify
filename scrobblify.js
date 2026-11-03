@@ -150,7 +150,7 @@
     }catch{return null;}
   }
   async function syncSpotifyLike(t, initial=false){
-    if(!t || get(STORE.loveSpotifyLikes,"false")!=="true" || !isConnected()) return;
+    if(!t || get(STORE.loveSpotifyLikes,"true")!=="true" || !isConnected()) return;
     const saved=await spotifyTrackIsSaved(t.uri);
     if(saved===null) return;
     if(initial || state.spotifyLiked===null){state.spotifyLiked=saved;return;}
@@ -185,7 +185,7 @@
     if(isLBConnected()&&get(STORE.lbEnabled,"true")==="true"&&lbRule.eligible&&state.playedMs>=lbRule.threshold&&!lbScrobbleKeys().includes(t.uri+":"+ts)){
       markLBScrobbled(t.uri+":"+ts);lbSendScrobble(t,ts);
     }
-    if(get(STORE.loveSpotifyLikes,"false")==="true" && Date.now()-state.likeCheckAt>2500){
+    if(get(STORE.loveSpotifyLikes,"true")==="true" && Date.now()-state.likeCheckAt>2500){
       state.likeCheckAt=Date.now();syncSpotifyLike(t,false);
     }
   }
@@ -333,7 +333,7 @@
         <div style="padding:0 14px 14px;border-top:1px solid #333">
       ${toggle("lfmc-lfm-toggle","Enable scrobbling",STORE.lfmEnabled)}
       ${toggle("lfmc-lfm-nowplaying","Submit 'Now Playing' status",STORE.lfmNowPlaying)}
-      ${toggle("lfmc-love-liked","Love Spotify-liked tracks on Last.fm",STORE.loveSpotifyLikes,"false")}
+      ${toggle("lfmc-love-liked","Love Spotify-liked tracks on Last.fm",STORE.loveSpotifyLikes,"true")}
       ${numeric("lfmc-lfm-mintrack","Minimum song duration (seconds)",STORE.lfmMinTrack,"30",0,600,"Tracks shorter than this are skipped.")}
       ${numeric("lfmc-lfm-percent","Scrobble delay percent",STORE.lfmPercent,"50",1,99,"Scrobble after this percentage of the track has played, or the seconds threshold below — whichever comes first.")}
       ${numeric("lfmc-lfm-delay","Scrobble delay seconds",STORE.lfmDelay,"240",1,1200,"Maximum listening time before a scrobble is eligible.")}
@@ -394,7 +394,7 @@
     root.querySelector("#lfmc-disconnect").onclick=()=>{set(STORE.session,"");set(`${EXT}:pendingToken`,"");status("Last.fm disconnected");renderTab();};
     bindToggle("lfmc-lfm-toggle",STORE.lfmEnabled,"true","Last.fm scrobbling");
     bindToggle("lfmc-lfm-nowplaying",STORE.lfmNowPlaying,"true","Last.fm Now Playing");
-    bindToggle("lfmc-love-liked",STORE.loveSpotifyLikes,"false","Spotify like sync");
+    bindToggle("lfmc-love-liked",STORE.loveSpotifyLikes,"true","Spotify like sync");
     bindToggle("lfmc-lb-toggle",STORE.lbEnabled,"true","ListenBrainz scrobbling");
     bindToggle("lfmc-lb-nowplaying",STORE.lbNowPlaying,"true","ListenBrainz Now Playing");
     bindToggle("lfmc-master-toggle",STORE.enabled,"true","Master scrobbling");
@@ -431,10 +431,9 @@
     const syncPeriod=()=>{const lb=service.value==="listenbrainz";period.innerHTML=lb?'<option value="week">This week</option><option value="month">This month</option><option value="year">This year</option><option value="all_time">All time</option>':'<option value="7day">7 days</option><option value="1month">1 month</option><option value="3month">3 months</option><option value="6month">6 months</option><option value="12month">12 months</option><option value="overall">All time</option>';};
     const load=async()=>{const dest=root.querySelector("#lfmc-chartlist");dest.innerHTML="<div class='lfmc-empty'>Loading…</div>";try{if(service.value==="lastfm"){if(!isConnected())throw new Error("Connect Last.fm in Settings first.");const method={recordings:"user.getTopTracks",artists:"user.getTopArtists",releases:"user.getTopAlbums"}[kind.value];const r=await api(method,{user:get(STORE.username),period:period.value,limit:"20"},false);const rows=kind.value==="recordings"?(r.toptracks?.track||[]):kind.value==="artists"?(r.topartists?.artist||[]):(r.topalbums?.album||[]);dest.innerHTML=rows.map((t,i)=>`<div class="lfmc-row"><div style="width:30px;color:#d77;font-weight:750;text-align:center">${i+1}</div><div class="lfmc-rowinfo"><div class="lfmc-rowtitle">${esc(t.name||t.title||"Unknown")}</div><div class="lfmc-rowartist">${esc(t.artist?.name||t.artist?.title||t.artist?.name||"")}</div></div><div class="lfmc-muted">${fmt(t.playcount)} plays</div></div>`).join("")||"<div class='lfmc-empty'>No chart data.</div>";}else{if(!isLBConnected())throw new Error("Connect ListenBrainz in Settings first.");const user=encodeURIComponent(get(STORE.lbUser)),range=period.value,endpoint={recordings:"recordings",artists:"artists",releases:"releases"}[kind.value];const r=await lbPublic(`/1/stats/user/${user}/${endpoint}?range=${encodeURIComponent(range)}&count=20`);const rows=r.payload?.[endpoint]||[];dest.innerHTML=rows.map((t,i)=>{const title=t.track_name||t.recording_name||t.artist_name||t.release_name||t.release_group_name||"Unknown";const sub=kind.value==="recordings"?t.artist_name:kind.value==="releases"?t.artist_name:"";return `<div class="lfmc-row"><div style="width:30px;color:#8bb5ef;font-weight:750;text-align:center">${i+1}</div><div class="lfmc-rowinfo"><div class="lfmc-rowtitle">${esc(title)}</div><div class="lfmc-rowartist">${esc(sub)}</div></div><div class="lfmc-muted">${fmt(t.listen_count)} listens</div></div>`;}).join("")||"<div class='lfmc-empty'>No chart data yet.</div>";}}catch(e){dest.innerHTML=`<div class='lfmc-empty'>${esc(e.message)}</div>`;}};
     service.onchange=()=>{syncPeriod();load();};period.onchange=load;kind.onchange=load;syncPeriod();await load();}
-  async function loveCurrent(){const t=state.track;if(!t)return;const loved=get(`${EXT}:loved:${t.uri}`)==="true",score=loved?0:1,method=loved?"track.unlove":"track.love",outcomes=[];if(isConnected()){try{await api(method,{artist:t.artist,track:t.title});outcomes.push(loved?"Last.fm un-loved":"Last.fm loved ♥");}catch(e){outcomes.push("Last.fm: "+e.message);}}if(isLBConnected()){try{const msids=JSON.parse(get(`${EXT}:lbMsids`,"{}"));const msid=msids[t.uri];if(!msid)throw new Error("ListenBrainz recording ID unavailable yet; restart the track and try again");await lbRequest("/1/feedback/recording-feedback",{method:"POST",body:JSON.stringify({recording_msid:msid,score})});outcomes.push(loved?"ListenBrainz un-loved":"ListenBrainz loved ♥");}catch(e){outcomes.push("ListenBrainz: "+e.message);}}if(outcomes.some(x=>!x.includes(": ")))set(`${EXT}:loved:${t.uri}`,loved?"false":"true");status(outcomes.length?outcomes.join(" · "):"Connect at least one service first",!outcomes.length);}
   async function hateCurrent(){const t=state.track;if(!t||!isLBConnected())return;try{const msids=JSON.parse(get(`${EXT}:lbMsids`,"{}"));const msid=msids[t.uri];if(!msid)throw new Error("ListenBrainz recording ID unavailable yet; restart the track and try again");await lbRequest("/1/feedback/recording-feedback",{method:"POST",body:JSON.stringify({recording_msid:msid,score:-1})});status("Marked as disliked on ListenBrainz");}catch(e){status(e.message,true);}}
-  function addLoveButton(){if(document.getElementById("lfmc-love"))return;const b=document.createElement("button");b.id="lfmc-love";b.title="Love current track on Last.fm and ListenBrainz";b.textContent="♥";b.style.cssText="position:fixed;bottom:105px;right:22px;z-index:9997;width:38px;height:38px;border:1px solid #555;border-radius:50%;background:#222;color:#ff7777;font-size:18px;cursor:pointer;display:none";b.onclick=loveCurrent;document.body.appendChild(b);const h=document.createElement("button");h.id="lfmc-hate";h.title="Mark current track as disliked on ListenBrainz";h.textContent="−";h.style.cssText="position:fixed;bottom:105px;right:68px;z-index:9997;width:38px;height:38px;border:1px solid #555;border-radius:50%;background:#222;color:#aaa;font-size:22px;cursor:pointer;display:none";h.onclick=hateCurrent;document.body.appendChild(h);}
-  function refreshDashboard(){const love=document.getElementById("lfmc-love"),hate=document.getElementById("lfmc-hate");if(love)love.style.display=state.track&&(isConnected()||isLBConnected())?"block":"none";if(hate)hate.style.display=state.track&&isLBConnected()?"block":"none";if(document.getElementById("lfmc-overlay"))renderTab();}
+  function addLoveButton(){const h=document.createElement("button");h.id="lfmc-hate";h.title="Mark current track as disliked on ListenBrainz";h.textContent="−";h.style.cssText="position:fixed;bottom:105px;right:68px;z-index:9997;width:38px;height:38px;border:1px solid #555;border-radius:50%;background:#222;color:#aaa;font-size:22px;cursor:pointer;display:none";h.onclick=hateCurrent;document.body.appendChild(h);}
+  function refreshDashboard(){const hate=document.getElementById("lfmc-hate");if(hate)hate.style.display=state.track&&isLBConnected()?"block":"none";if(document.getElementById("lfmc-overlay"))renderTab();}
   function init(){if(!Spicetify.Player||!Spicetify.LocalStorage){setTimeout(init,300);return;}injectStyles();createLauncher();watchProfileMenu();addLoveButton();
     Spicetify.Player.addEventListener("songchange",onTrackChange);Spicetify.Player.addEventListener("onprogress",onProgress);Spicetify.Player.addEventListener("onplaypause",()=>{if(Spicetify.Player.isPlaying()&&state.track){state.lastTick=Date.now();if(get(STORE.lfmNowPlaying,"true")==="true")updateNowPlaying(state.track);
       if(get(STORE.lbNowPlaying,"true")==="true")lbNowPlaying(state.track);}});
