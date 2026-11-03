@@ -1,0 +1,11 @@
+{
+  "name": "Fmify",
+  "description": "A local-first Spotify scrobbler for Last.fm and ListenBrainz, with a listening dashboard.",
+  "preview": "assets/screenshots/Main_Interface.png",
+  "main": "fmify.js",
+  "readme": "README.md",
+  "authors": [
+    { "name": "adityq", "url": "https://github.com/adityq" }
+  ],
+  "tags": ["scrobbler", "lastfm", "listenbrainz"]
+}
