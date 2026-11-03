@@ -2,7 +2,7 @@
 
   <img src="assets/Baneer.png" width="850" alt="Fmify banner">
 
-  # Fmify
+  # Fmify 🌻
 
   **Keep every beat of your journey. 🧡**
 
