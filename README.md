@@ -56,12 +56,7 @@ Connect either service or both. Each has its own credentials, controls, connecti
 
 <details>
   <summary><strong>👁️ Preview Screenshots</strong></summary>
-
-  <h3>🏠 Main Interface</h3>
-  <p align="center">
-    <img src="assets/screenshots/Main_Interface.png" width="850" alt="Main Interface">
-  </p>
-
+  
   <h3>🎵 Overview Dashboard</h3>
   <p align="center">
     <img src="assets/screenshots/Interface_1.png" width="850" alt="Overview Dashboard">
