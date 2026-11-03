@@ -99,8 +99,16 @@ Connect either service or both. Each has its own credentials, controls, connecti
 - [Spicetify CLI](https://spicetify.app/) installed and applied
 - A [Last.fm](https://www.last.fm/) account and API credentials (optional)
 - A [ListenBrainz](https://listenbrainz.org/) account and user token (optional)
-
 ## 🚀 Installation
+
+### Option 1: Spicetify Marketplace (recommended)
+
+1. Open Spotify and click **Marketplace** in the sidebar.
+2. Go to the **Extensions** tab and search for **Fmify**.
+3. Click **Download** and restart Spotify.
+4. Click the Fmify music-note button to open the dashboard.
+
+### Option 2: Manual install
 
 1. Close Spotify.
 2. If you installed an older version, remove it first:
@@ -109,7 +117,7 @@ Connect either service or both. Each has its own credentials, controls, connecti
    spicetify config extensions scrobblify.js-
    ```
 
-3. Copy `fmify.js` into `%appdata%\Spicetify\Extensions\`. Replace the old file if it's still there.
+3. Download `fmify.js` from the [latest release](https://github.com/adityq/fmify/releases) and copy it into `%appdata%\Spicetify\Extensions\`. Replace the old file if it's still there.
 4. Run:
 
    ```powershell
@@ -118,7 +126,8 @@ Connect either service or both. Each has its own credentials, controls, connecti
    ```
 
 5. Restart Spotify and click the Fmify music-note button.
-6. Open **Settings** and connect your preferred service.
+
+Then open **Settings** and connect your preferred service.
 
 ## 🔗 Connect your services
 
