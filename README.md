@@ -17,11 +17,12 @@
 
 </div>
 
-
 ---
 
 > 📛 **Name change:** This project was previously called Scrobblify. It's now Fmify, with the same features and settings.
+
 ---
+
 ## 🧪 Beta Notice
 
 Fmify ![Latest version](https://img.shields.io/github/v/release/adityq/fmify?include_prereleases&label=latest&style=flat-square) is an early public beta. Bugs, unexpected behaviour, and compatibility issues may occur. Please report problems in [Issues](https://github.com/adityq/fmify/issues).
@@ -99,6 +100,7 @@ Connect either service or both. Each has its own credentials, controls, connecti
 - [Spicetify CLI](https://spicetify.app/) installed and applied
 - A [Last.fm](https://www.last.fm/) account and API credentials (optional)
 - A [ListenBrainz](https://listenbrainz.org/) account and user token (optional)
+
 ## 🚀 Installation
 
 ### Option 1: Spicetify Marketplace (recommended)
@@ -107,6 +109,8 @@ Connect either service or both. Each has its own credentials, controls, connecti
 2. Go to the **Extensions** tab and search for **Fmify**.
 3. Click **Download** and restart Spotify.
 4. Click the Fmify music-note button to open the dashboard.
+
+If you installed Fmify manually before, remove the manual copy first (see Option 2, step 2).
 
 ### Option 2: Manual install
 
