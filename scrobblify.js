@@ -143,11 +143,11 @@
     try{
       const api=Spicetify?.Platform?.LibraryAPI;
       if(!api?.contains) return null;
-      const result=await api.contains([uri]);
+      const result=await api.contains(uri);
       if(Array.isArray(result)) return !!(result[0]===true || result[0]?.addedAt || result[0]?.isInLibrary);
       if(typeof result==="boolean") return result;
       return null;
-    }catch{return null;}
+    }catch(e){console.warn(`[${EXT}] Spotify like check failed:`, e);return null;}
   }
   async function syncSpotifyLike(t, initial=false){
     if(!t || get(STORE.loveSpotifyLikes,"true")!=="true" || !isConnected()) return;
