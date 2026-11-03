@@ -56,6 +56,7 @@ Connect either service or both. Each has its own credentials, controls, connecti
 
 <details>
   <summary><strong>👁️ Preview Screenshots</strong></summary>
+
   
   <h3>🎵 Overview Dashboard</h3>
   <p align="center">
