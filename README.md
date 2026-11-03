@@ -8,7 +8,7 @@
 
   A local-first Spotify scrobbler for Spicetify.
 
-  [Features](#-features) · [Installation](#-installation) · [Setup](#-connect-your-services) · [Privacy](#-privacy)
+  [Features](#-features) · [Installation](#-installation) · [Preview](#-screenshots) · [Setup](#-connect-your-services) · [Privacy](#-privacy)
 
   ![Platform](https://img.shields.io/badge/platform-Windows-242424?style=flat-square)
   ![Spicetify](https://img.shields.io/badge/works%20with-Spicetify-1DB954?style=flat-square)
