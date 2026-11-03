@@ -1,7 +1,7 @@
 {
-  "name": "Fmify: Last.fm & ListenBrainz"
+  "name": "Fmify"
   "description": "A local-first Spotify scrobbler for Last.fm and ListenBrainz, with a listening dashboard.",
-  "preview": "assets/Fmify_Marketplace_Logo.png",
+  "preview": "assets/scrobblify-logo.png"
   "main": "fmify.js",
   "readme": "README.md",
   "authors": [
