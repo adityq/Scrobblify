@@ -113,8 +113,8 @@
   function markLBScrobbled(uri){const a=lbScrobbleKeys();if(!a.includes(uri))a.push(uri);set(STORE.lbScrobbled,JSON.stringify(a.slice(-300)));}
   function readLBQueue(){try{return JSON.parse(get(STORE.lbQueue,"[]"))||[];}catch{return[];}}
   function writeLBQueue(q){set(STORE.lbQueue,JSON.stringify(q.slice(-100)));}
-  async function lbSendScrobble(t,timestamp){if(!isLBConnected()||get(STORE.lbEnabled,"true")!=="true")return false;try{await lbRequest("/1/submit-listens",{method:"POST",body:JSON.stringify({listen_type:"single",payload:[{listened_at:timestamp,track_metadata:lbMetadata(t)}]})});markLBScrobbled(t.uri);status("ListenBrainz · Scrobbled · "+t.title);return true;}catch(e){const q=readLBQueue();if(!q.some(x=>x.uri===t.uri)){q.push({track:{title:t.title,artist:t.artist,album:t.album,duration:t.duration,uri:t.uri,spotifyId:t.spotifyId},timestamp});writeLBQueue(q);}status("ListenBrainz · queued for retry · "+e.message,true);return false;}}
-  async function lbRetryQueue(){if(!isLBConnected()||!navigator.onLine)return;const q=readLBQueue(),remain=[];for(const item of q){try{await lbRequest("/1/submit-listens",{method:"POST",body:JSON.stringify({listen_type:"single",payload:[{listened_at:item.timestamp,track_metadata:lbMetadata(item.track)}]})});markLBScrobbled(item.track.uri);}catch{remain.push(item);}}writeLBQueue(remain);if(q.length!==remain.length)status(`ListenBrainz · synced ${q.length-remain.length} queued listen(s)`);}
+  async function lbSendScrobble(t,timestamp){if(!isLBConnected()||get(STORE.lbEnabled,"true")!=="true")return false;try{await lbRequest("/1/submit-listens",{method:"POST",body:JSON.stringify({listen_type:"single",payload:[{listened_at:timestamp,track_metadata:lbMetadata(t)}]})});markLBScrobbled(t.uri+":"+timestamp);status("ListenBrainz · Scrobbled · "+t.title);return true;}catch(e){const q=readLBQueue();if(!q.some(x=>x.uri===t.uri)){q.push({track:{title:t.title,artist:t.artist,album:t.album,duration:t.duration,uri:t.uri,spotifyId:t.spotifyId},timestamp});writeLBQueue(q);}status("ListenBrainz · queued for retry · "+e.message,true);return false;}}
+  async function lbRetryQueue(){if(!isLBConnected()||!navigator.onLine)return;const q=readLBQueue(),remain=[];for(const item of q){try{await lbRequest("/1/submit-listens",{method:"POST",body:JSON.stringify({listen_type:"single",payload:[{listened_at:item.timestamp,track_metadata:lbMetadata(item.track)}]})});markLBScrobbled(item.track.uri+":"+item.timestamp);}catch{remain.push(item);}}writeLBQueue(remain);if(q.length!==remain.length)status(`ListenBrainz · synced ${q.length-remain.length} queued listen(s)`);}
   async function updateNowPlaying(t){
     if(!isConnected()||!t||get(STORE.lfmEnabled,"true")!=="true")return;
     const key=t.uri+":"+state.startedAt;if(key===state.nowPlayingKey)return;state.nowPlayingKey=key;
@@ -124,7 +124,7 @@
     if(!isConnected()||get(STORE.lfmEnabled,"true")!=="true")return false;
     const params={artist:t.artist,track:t.title,timestamp:String(timestamp)};
     if(t.album)params.album=t.album;
-    try{await api("track.scrobble",params);markScrobbled(t.uri);status("Scrobbled · "+t.title);return true;}
+    try{await api("track.scrobble",params);markScrobbled(t.uri+":"+timestamp);status("Scrobbled · "+t.title);return true;}
     catch(e){const q=readQueue();q.push({artist:t.artist,track:t.title,album:t.album,timestamp,uri:t.uri});writeQueue(q);status("Queued for retry · "+e.message,true);return false;}
   }
   async function retryQueue(){if(!isConnected()||!navigator.onLine)return;const q=readQueue();if(!q.length)return;const remain=[];
@@ -179,11 +179,11 @@
     const duration=state.track.duration;
     const t=state.track, ts=state.startedAt;
     const lfmRule=serviceThreshold("lfm",duration), lbRule=serviceThreshold("lb",duration);
-    if(isConnected()&&get(STORE.lfmEnabled,"true")==="true"&&lfmRule.eligible&&state.playedMs>=lfmRule.threshold&&!readScrobbled().includes(t.uri)){
-      markScrobbled(t.uri);sendScrobble(t,ts);
+    if(isConnected()&&get(STORE.lfmEnabled,"true")==="true"&&lfmRule.eligible&&state.playedMs>=lfmRule.threshold&&!readScrobbled().includes(t.uri+":"+ts)){
+      markScrobbled(t.uri+":"+ts);sendScrobble(t,ts);
     }
-    if(isLBConnected()&&get(STORE.lbEnabled,"true")==="true"&&lbRule.eligible&&state.playedMs>=lbRule.threshold&&!lbScrobbleKeys().includes(t.uri)){
-      markLBScrobbled(t.uri);lbSendScrobble(t,ts);
+    if(isLBConnected()&&get(STORE.lbEnabled,"true")==="true"&&lbRule.eligible&&state.playedMs>=lbRule.threshold&&!lbScrobbleKeys().includes(t.uri+":"+ts)){
+      markLBScrobbled(t.uri+":"+ts);lbSendScrobble(t,ts);
     }
     if(get(STORE.loveSpotifyLikes,"false")==="true" && Date.now()-state.likeCheckAt>2500){
       state.likeCheckAt=Date.now();syncSpotifyLike(t,false);
