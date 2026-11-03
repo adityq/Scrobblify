@@ -17,6 +17,10 @@
 
 </div>
 
+
+---
+
+> 📛 **Name change:** This project was previously called Scrobblify. It's now Fmify, with the same features and settings.
 ---
 ## 🧪 Beta Notice
 
