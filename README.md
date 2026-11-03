@@ -2,7 +2,7 @@
 
   <img src="assets/scrobblify-logo.png" width="132" alt="Fmify logo">
 
-  # Fmify
+  # Fmify 🌻
 
   **Keep every beat of your journey. 🧡**
 
