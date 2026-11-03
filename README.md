@@ -21,7 +21,7 @@
 
 ## 🧪 Beta Notice
 
-Fmify v1.1.1 is an early public beta. Bugs, unexpected behaviour, and compatibility issues may occur. Please report problems in [Issues](https://github.com/adityq/fmify/issues).
+Fmify ![Latest version](https://img.shields.io/github/v/release/adityq/fmify?include_prereleases&label=latest&style=flat-square) is an early public beta. Bugs, unexpected behaviour, and compatibility issues may occur. Please report problems in [Issues](https://github.com/adityq/fmify/issues).
 
 ## 🎵 What is Fmify?
 
