@@ -43,6 +43,50 @@ Connect either service or both. Each has its own credentials, controls, connecti
 - **📈 Charts** — Listening statistics and top items.
 - **⚙️ Settings** — Credentials, service switches, and scrobbling preferences.
 
+
+## 📸 Scrobblify Screenshots</h2>
+
+<details>
+  <summary><strong>👁️ Preview Screenshots</strong></summary>
+
+  <h3>🏠 Main Interface</h3>
+  <p align="center">
+    <img src="assets/screenshots/Main_Interface.png" width="850" alt="Main Interface">
+  </p>
+
+  <h3>🎵 Overview Dashboard</h3>
+  <p align="center">
+    <img src="assets/screenshots/Interface_1.png" width="850" alt="Overview Dashboard">
+  </p>
+
+  <h3>📜 Listening History</h3>
+  <p align="center">
+    <img src="assets/screenshots/Interface_History.png" width="850" alt="Listening History">
+  </p>
+
+  <h3>📊 Charts & Statistics</h3>
+  <p align="center">
+    <img src="assets/screenshots/Interface_Chart.png" width="850" alt="Charts">
+  </p>
+
+  <h3>⚙️ Settings</h3>
+  <p align="center">
+    <img src="assets/screenshots/Interface_Settings.png" width="850" alt="Settings">
+  </p>
+
+  <h3>🌐 Last.fm Connection</h3>
+  <p align="center">
+    <img src="assets/screenshots/Lastfm.png" width="850" alt="Last.fm">
+  </p>
+
+  <h3>🎧 ListenBrainz Connection</h3>
+  <p align="center">
+    <img src="assets/screenshots/ListenBrainz.png" width="850" alt="ListenBrainz">
+  </p>
+
+</details>
+
+
 ## 📋 Requirements
 
 - Spotify desktop for Windows
