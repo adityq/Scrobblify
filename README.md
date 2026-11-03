@@ -186,6 +186,6 @@ The extension has been syntax-checked and tested on a few setups, but has not ye
 
   ---
 
-  **Made by a fellow Indian, for music lovers everywhere. 🇮🇳🎧**
+  **Made by a fellow Indian, for music lovers everywhere. 🇮🇳🧡**
 
 </div>
