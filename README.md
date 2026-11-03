@@ -1,8 +1,8 @@
- <div align="center">
+<div align="center">
 
-  <img src="assets/scrobblify-logo.png" width="132" alt="Scrobblify logo">
+  <img src="assets/scrobblify-logo.png" width="132" alt="Fmify logo">
 
-  # Scrobblify
+  # Fmify
 
   **Keep every beat of your journey. 🧡**
 
@@ -13,16 +13,21 @@
   ![Platform](https://img.shields.io/badge/platform-Windows-242424?style=flat-square)
   ![Spicetify](https://img.shields.io/badge/works%20with-Spicetify-1DB954?style=flat-square)
   ![License](https://img.shields.io/badge/license-MIT-orange?style=flat-square)
+  ![Status](https://img.shields.io/badge/status-beta-FF6A00?style=flat-square)
 
 </div>
 
 ---
 
-## 🎵 What is Scrobblify?
+## 🧪 Beta Notice
 
-Scrobblify is a **Spicetify extension for Spotify desktop on Windows** that sends your listening activity to **Last.fm** and **ListenBrainz** independently.
+Fmify v1.1.1 is an early public beta. Bugs, unexpected behaviour, and compatibility issues may occur. Please report problems in [Issues](https://github.com/adityq/fmify/issues).
 
-Connect either service or both. Each has its own credentials, controls, connection status, and retry queue. Your listening data is sent directly from Spotify to the services — no Scrobblify server in the middle.
+## 🎵 What is Fmify?
+
+Fmify is a **Spicetify extension for Spotify desktop on Windows** that sends your listening activity to **Last.fm** and **ListenBrainz** independently.
+
+Connect either service or both. Each has its own credentials, controls, connection status, and retry queue. Your listening data is sent directly from Spotify to the services, with no Fmify server in the middle.
 
 ## ✨ Features
 
@@ -32,19 +37,18 @@ Connect either service or both. Each has its own credentials, controls, connecti
 | 🎶 | **Now Playing** | Update both services when your track changes |
 | 🕘 | **Listening history** | Browse recent listening activity |
 | 📊 | **Charts & stats** | Explore top tracks, artists, albums, recordings, and releases |
-| ❤️ | **Track feedback** | Love tracks on Last.fm; send love/hate feedback on ListenBrainz when supported |
+| ❤️ | **Spotify like sync** | Liking a track in Spotify loves it on Last.fm, and unliking removes the love. On by default; can be turned off in Settings |
 | 🔄 | **Offline retry** | Queue submissions for retry, with per-service duplicate protection |
 | ⚙️ | **Independent controls** | Configure each service separately from the dashboard |
 
 ## 🖥️ Dashboard
 
-- **🏠 Overview** — Playback and connection status.
-- **📜 History** — Recent listening activity from either service.
-- **📈 Charts** — Listening statistics and top items.
-- **⚙️ Settings** — Credentials, service switches, and scrobbling preferences.
+- **🏠 Overview**: Playback and connection status.
+- **📜 History**: Recent listening activity from either service.
+- **📈 Charts**: Listening statistics and top items.
+- **⚙️ Settings**: Credentials, service switches, and scrobbling preferences.
 
-
-## 📸 Scrobblify Screenshots</h2>
+## 📸 Screenshots
 
 <details>
   <summary><strong>👁️ Preview Screenshots</strong></summary>
@@ -86,7 +90,6 @@ Connect either service or both. Each has its own credentials, controls, connecti
 
 </details>
 
-
 ## 📋 Requirements
 
 - Spotify desktop for Windows
@@ -97,82 +100,18 @@ Connect either service or both. Each has its own credentials, controls, connecti
 ## 🚀 Installation
 
 1. Close Spotify.
-2. Copy `scrobblify.js` into `%appdata%\Spicetify\Extensions\`.
-3. Run:
+2. If you installed an older version, remove it first:
 
    ```powershell
-   spicetify config extensions scrobblify.js
+   spicetify config extensions scrobblify.js-
+   ```
+
+3. Copy `fmify.js` into `%appdata%\Spicetify\Extensions\`. Replace the old file if it's still there.
+4. Run:
+
+   ```powershell
+   spicetify config extensions fmify.js
    spicetify apply
    ```
 
-4. Restart Spotify and click the Scrobblify music-note button.
-5. Open **Settings** and connect your preferred service.
-
-## 🔗 Connect your services
-
-<details>
-<summary>🎧 <strong>Last.fm</strong></summary>
-
-1. Create API credentials at https://www.last.fm/api/account.
-2. Enter your API key, shared secret, and username in Scrobblify Settings.
-3. Click **Connect Last.fm** and approve the app.
-4. Return to Spotify and click **I've approved — finish connection**.
-
-</details>
-
-<details>
-<summary>🎵 <strong>ListenBrainz</strong></summary>
-
-1. Open https://listenbrainz.org/settings/ and copy your user token.
-2. Paste it into Scrobblify Settings.
-3. Click **Validate & connect**.
-
-</details>
-
-## 🔒 Privacy
-
-- Credentials, preferences, duplicate guards, and retry queues are stored in Spicetify local storage for the current Windows user.
-- Requests go directly from Spotify to Last.fm and ListenBrainz.
-- No companion server, analytics endpoint, telemetry, or third-party proxy is used.
-- Spicetify local storage is not a secure secret vault. Tokens and secrets are accessible to software running as your Windows user.
-- Disconnect clears locally stored credentials. Revoke app access separately in each service's settings if needed.
-
-## 📝 Notes & limitations
-
-Scrobblify focuses on music tracking and personal listening features. It does not reproduce every feature of the Last.fm or ListenBrainz websites/APIs.
-
-ListenBrainz requires a `recording_msid` or MusicBrainz recording ID for love/hate feedback. Feedback may be unavailable if the service does not return an identifier.
-
-The extension has been syntax-checked, but has not yet been fully exercised across all Spotify installations or account configurations.
-
-<details>
-<summary>🛠️ <strong>Troubleshooting</strong></summary>
-
-- **Button missing:** Confirm the extension is installed and run `spicetify apply`.
-- **Last.fm authorization error:** Verify your API key and shared secret.
-- **ListenBrainz token error:** Generate a new token in ListenBrainz Settings.
-- **Scrobbles not sending:** Check the scrobbling switches and connection status. Inspect Spotify DevTools (`Ctrl` + `Shift` + `I`) for errors.
-
-</details>
-
-## 📄 License
-
-[MIT](LICENSE)
-
----
-
-<div align="center">
-
-  <p><strong>✨ A little about Scrobblify 🤖 ✨</strong></p>
-
-  Scrobblify is a **vibe-coded project**, built with human ideas, AI assistance, experimentation, debugging, and plenty of trial and error.
-
-  An independent project driven by curiosity and a love for music.
-
-  <br>
-  
-  ---
-
-  **Made by a fellow Indian, for music lovers everywhere. 🇮🇳🎧**
-
-</div>
+5. Restart Spotify and click the Fmify music-note
