@@ -1,11 +1,11 @@
 /*
- * Fmify for Spicetify — v1.1.1
+ * Fmify for Spicetify — v1.2.7 Stats.fm token + responsive layout
  * A local-first dual-service Last.fm + ListenBrainz scrobbler and listening dashboard.
  * API credentials and session key are stored in Spicetify.LocalStorage.
  */
 (() => {
   const EXT = "scrobblify";
-  const VERSION = "1.1.1";
+  const VERSION = "1.2.7";
   const API = "https://ws.audioscrobbler.com/2.0/";
   const STORE = {
     // Keep v1.0 Last.fm keys so existing credentials and queues migrate without re-entry.
@@ -17,7 +17,12 @@
     lfmMinTrack: `${EXT}:lfmMinTrack`, lbMinTrack: `${EXT}:lbMinTrack`,
     lfmPercent: `${EXT}:lfmPercent`, lbPercent: `${EXT}:lbPercent`,
     lfmDelay: `${EXT}:lfmDelay`, lbDelay: `${EXT}:lbDelay`,
-    loveSpotifyLikes: `${EXT}:loveSpotifyLikes`
+    loveSpotifyLikes: `${EXT}:loveSpotifyLikes`,
+    artworkSource: `${EXT}:artworkSource`,
+    statsfmUser: `${EXT}:statsfmUser`,
+    statsfmToken: `${EXT}:statsfmToken`,
+    homeLastfm: `${EXT}:homeLastfm`, homeListenbrainz: `${EXT}:homeListenbrainz`, homeStatsfm: `${EXT}:homeStatsfm`,
+    spotifyHistory: `${EXT}:spotifyLocalHistory`,
   };
   const get = (k, fallback = "") => Spicetify.LocalStorage.get(k) ?? fallback;
   const set = (k, v) => Spicetify.LocalStorage.set(k, String(v));
@@ -93,7 +98,7 @@
     if(!title||!artists||!uri.startsWith("spotify:track:")) return null;
     return {title,artist:artists.split(/,\s*/)[0],album,duration,uri,spotifyId:uri.replace("spotify:track:",""),artists,cover:m.image_url||m.image||""};
   }
-  const state={track:null,startedAt:0,lastTick:0,playedMs:0,nowPlayingKey:"",dashboard:null,tab:"overview",busy:false,online:navigator.onLine,spotifyLiked:null,likeCheckAt:0};
+  const state={track:null,startedAt:0,lastTick:0,playedMs:0,nowPlayingKey:"",dashboard:null,tab:"overview",busy:false,online:navigator.onLine,spotifyLiked:null,likeCheckAt:0,chartCache:Object.create(null),chartService:"lastfm",chartPeriod:"7day",chartLoadDurations:[]};
   function readQueue(){try{return JSON.parse(get(STORE.queue,"[]"))||[]}catch{return[]}}
   function writeQueue(q){set(STORE.queue,JSON.stringify(q.slice(-100)));}
   function readScrobbled(){try{return JSON.parse(get(STORE.scrobbled,"[]"))||[]}catch{return[]}}
@@ -106,6 +111,31 @@
     const raw=await res.text(); let data={}; try{data=raw?JSON.parse(raw):{};}catch{}
     if(!res.ok) throw new Error(data.error||data.message||`ListenBrainz API error ${res.status}`);
     return data;
+  }
+  const STATSFM_BASES=["https://prod-api-k8s.stats.fm/api/v1","https://api.stats.fm/api/v1","https://beta-api.stats.fm/api/v1"];
+  async function statsFmRequest(path, token=get(STORE.statsfmToken), options={}) {
+    let lastError;
+    for(const base of STATSFM_BASES){
+      try{
+        const headers={Accept:"application/json",...(options.headers||{})};
+        if(token)headers.Authorization=`Bearer ${token}`;
+        const res=await fetch(base+path,{...options,headers});
+        const raw=await res.text();let data={};try{data=raw?JSON.parse(raw):{};}catch{}
+        if(!res.ok)throw new Error(data.message||data.error||`stats.fm API error ${res.status}`);
+        return data;
+      }catch(e){lastError=e;}
+    }
+    throw lastError||new Error("stats.fm API unavailable");
+  }
+  function statsFmAccountFromMe(response){
+    const candidates=[response?.user,response?.profile,response?.data?.user,response?.data?.profile,response?.data,response?.me,response];
+    for(const candidate of candidates){
+      if(!candidate||typeof candidate!=="object")continue;
+      const u=candidate.user&&typeof candidate.user==="object"?candidate.user:candidate;
+      const id=u.id??u.userId??u.user_id??u.uid;
+      if(id!==undefined&&id!==null&&String(id).trim())return {id:String(id),name:u.displayName||u.display_name||u.username||u.name||String(id)};
+    }
+    return null;
   }
   function lbMetadata(t){return {artist_name:t.artist,track_name:t.title,...(t.album?{release_name:t.album}:{}),additional_info:{media_player:"Spotify",submission_client:"Fmify",music_service:"spotify.com",origin_url:`https://open.spotify.com/track/${t.spotifyId}`,spotify_id:`https://open.spotify.com/track/${t.spotifyId}`,...(t.duration?{duration_ms:t.duration}:{})}};}
   async function lbNowPlaying(t){if(!isLBConnected()||!t||get(STORE.lbEnabled,"true")!=="true")return;try{const r=await lbRequest("/1/submit-listens?return_msid=true",{method:"POST",body:JSON.stringify({listen_type:"playing_now",payload:[{track_metadata:lbMetadata(t)}]})});const msid=r?.payload?.[0]?.recording_msid||r?.recording_msid;if(msid){const map=JSON.parse(get(`${EXT}:lbMsids`,"{}"));map[t.uri]=msid;set(`${EXT}:lbMsids`,JSON.stringify(map));}status("ListenBrainz · Now playing sent");}catch(e){status("ListenBrainz · "+e.message,true);}}
@@ -161,7 +191,19 @@
       status(saved ? "Loved on Last.fm · Spotify liked track" : "Unloved on Last.fm · Spotify like removed");
     }catch(e){status("Last.fm like sync · "+e.message,true);}
   }
+  // Spotify-only local listening tracker. Records sessions from the moment this version is installed.
+  function readSpotifyHistory(){try{return JSON.parse(get(STORE.spotifyHistory,"[]"))||[];}catch{return[];}}
+  function saveSpotifyHistory(items){set(STORE.spotifyHistory,JSON.stringify(items.slice(-5000)));}
+  function recordSpotifySession(){
+    const t=state.track;if(!t||state.playedMs<1000)return;
+    const history=readSpotifyHistory(), key=t.uri+":"+state.startedAt;
+    const old=history.find(x=>x.key===key);
+    const entry={key,uri:t.uri,id:t.spotifyId,title:t.title,artist:t.artists||t.artist,album:t.album,cover:t.cover,duration:t.duration,playedMs:Math.min(state.playedMs,t.duration||state.playedMs),startedAt:state.startedAt,endedAt:now()};
+    if(old)Object.assign(old,entry);else history.push(entry);saveSpotifyHistory(history);
+  }
+  function spotifyStats(){const h=readSpotifyHistory(),artists={},tracks={},albums={};let total=0;h.forEach(x=>{const ms=Number(x.playedMs)||0;total+=ms;const tk=x.title+"|"+x.artist;tracks[tk]??={title:x.title,artist:x.artist,cover:x.cover,count:0,ms:0};tracks[tk].count++;tracks[tk].ms+=ms;artists[x.artist]??={title:x.artist,count:0,ms:0};artists[x.artist].count++;artists[x.artist].ms+=ms;albums[x.album||"Unknown album"]??={title:x.album||"Unknown album",count:0,ms:0};albums[x.album||"Unknown album"].count++;albums[x.album||"Unknown album"].ms+=ms;});const sort=o=>Object.values(o).sort((a,b)=>b.ms-a.ms);return{history:h,total,artists:sort(artists),tracks:sort(tracks),albums:sort(albums)};}
   function onTrackChange(){
+    recordSpotifySession();
     const t=trackFromPlayer();state.track=t;state.startedAt=now();state.playedMs=0;state.lastTick=Date.now();state.nowPlayingKey="";
     state.spotifyLiked=null;
     if(t&&Spicetify.Player.isPlaying()){
@@ -172,10 +214,12 @@
     refreshDashboard();
   }
   function onProgress(){
-    if(!state.track||!Spicetify.Player.isPlaying()||get(STORE.enabled,"true")!=="true")return;
+    if(!state.track||!Spicetify.Player.isPlaying())return;
     const tick=Date.now();
     if(state.lastTick)state.playedMs+=Math.min(Math.max(0,tick-state.lastTick),5000);
     state.lastTick=tick;
+    recordSpotifySession();
+    if(get(STORE.enabled,"true")!=="true")return;
     const duration=state.track.duration;
     const t=state.track, ts=state.startedAt;
     const lfmRule=serviceThreshold("lfm",duration), lbRule=serviceThreshold("lb",duration);
@@ -189,7 +233,23 @@
       state.likeCheckAt=Date.now();syncSpotifyLike(t,false);
     }
   }
-  function status(message,error=false){const el=document.querySelector("#lfmc-status");if(el){el.textContent=message;el.dataset.error=error?"1":"0";}}
+  const activity=[];
+  const logLine=(msg)=>{
+    const line=`${new Date().toLocaleTimeString()}  ${msg}`;
+    activity.push(line);
+    if(activity.length>200)activity.shift();
+    const el=document.getElementById("lfmc-log");
+    if(el){el.innerHTML=`<div>${esc(line)}</div>`;}
+  };
+  function status(message,error=false){const el=document.querySelector("#lfmc-status");if(el){el.textContent=message;el.dataset.error=error?"1":"0";}logLine((error?"⚠ ":"")+message);}
+  function setActivityProgress(value){
+    const el=document.getElementById("lfmc-log");
+    if(el)el.style.setProperty("--lfmc-progress",`${Math.max(0,Math.min(100,Number(value)||0))}%`);
+  }
+  function chartProgressStart(){setActivityProgress(6);}
+  function chartProgressFinish(){setActivityProgress(100);setTimeout(()=>setActivityProgress(0),900);}
+
+
 
   const css=`
   #lfmc-launch {
@@ -226,14 +286,670 @@
   color: var(--spice-text) !important;
   background: var(--spice-card) !important;
 }
-  #lfmc-overlay{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:3vh 3vw;font-family:var(--font-family,Arial,sans-serif)}
+  #lfmc-overlay{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:3vh 3vw;font-family:"Satoshi",var(--font-family,Arial,sans-serif)}
   #lfmc-panel{width:min(920px,96vw);height:min(690px,92vh);min-height:470px;background:#151515;color:#f5f5f5;border:1px solid #343434;border-radius:18px;box-shadow:0 24px 90px #000a;overflow:hidden;display:flex;flex-direction:column}
   #lfmc-panel *{box-sizing:border-box} .lfmc-head{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid #303030;background:linear-gradient(120deg,#241b20,#171717 55%)}
   .lfmc-brand{display:flex;align-items:center;gap:12px}.lfmc-logo{width:42px;height:42px;flex:0 0 42px;display:block;object-fit:contain;border-radius:11px;background:transparent;filter:drop-shadow(0 2px 5px #0008)}.lfmc-title{font-size:19px;font-weight:750;letter-spacing:-.4px}.lfmc-sub{font-size:11px;color:#aaa;margin-top:3px}.lfmc-close{border:0;background:#292929;color:#ddd;border-radius:9px;width:34px;height:34px;cursor:pointer;font-size:20px}
-  .lfmc-body{display:flex;min-height:0;flex:1}.lfmc-side{width:190px;padding:18px 12px;border-right:1px solid #303030;background:#191919}.lfmc-nav{display:flex;flex-direction:column;gap:5px}.lfmc-nav button{border:0;background:transparent;color:#aaa;text-align:left;padding:11px 12px;border-radius:9px;cursor:pointer;font-size:13px}.lfmc-nav button.active,.lfmc-nav button:hover{background:#302323;color:#fff}.lfmc-main{flex:1;overflow:auto;padding:24px}.lfmc-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.lfmc-card{background:#202020;border:1px solid #333;border-radius:13px;padding:15px;min-width:0}.lfmc-label{font-size:11px;color:#aaa;text-transform:uppercase;letter-spacing:.8px}.lfmc-number{font-size:25px;font-weight:750;margin-top:8px}.lfmc-muted{color:#999;font-size:12px}.lfmc-now{display:flex;align-items:center;gap:16px;margin:18px 0;padding:17px;background:linear-gradient(110deg,#321d20,#202020);border:1px solid #573032;border-radius:14px}.lfmc-cover{width:76px;height:76px;border-radius:9px;background:#333;object-fit:cover}.lfmc-track{font-weight:700;font-size:16px;overflow-wrap:anywhere}.lfmc-artist{font-size:13px;color:#bbb;margin-top:5px}.lfmc-pill{font-size:10px;background:#4a2424;color:#ffb4ae;padding:5px 8px;border-radius:30px;display:inline-block;margin-top:8px}.lfmc-section{font-size:15px;font-weight:700;margin:20px 0 10px}.lfmc-list{display:flex;flex-direction:column;gap:7px}.lfmc-row{display:flex;align-items:center;gap:11px;background:#202020;border:1px solid #303030;border-radius:10px;padding:9px 11px}.lfmc-row img{width:42px;height:42px;border-radius:6px;object-fit:cover;background:#333}.lfmc-rowinfo{min-width:0;flex:1}.lfmc-rowtitle{font-size:13px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lfmc-rowartist{font-size:11px;color:#999;margin-top:4px}.lfmc-btn{border:0;border-radius:9px;padding:10px 14px;background:#FF6A00;color:white;font-weight:650;cursor:pointer;font-size:12px}.lfmc-btn.secondary{background:#333;color:#eee}.lfmc-btn:disabled{opacity:.5;cursor:default}.lfmc-field{display:flex;flex-direction:column;gap:6px;margin:13px 0}.lfmc-field label{font-size:12px;color:#bbb}.lfmc-field input{background:#101010;border:1px solid #444;color:#fff;border-radius:8px;padding:10px 11px;outline:none}.lfmc-field input:focus{border-color:#FF6A00}.lfmc-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.lfmc-note{font-size:11px;color:#888;line-height:1.55;margin-top:12px}.lfmc-status{padding:10px 18px;border-top:1px solid #303030;color:#aaa;font-size:11px;display:flex;justify-content:space-between}.lfmc-status[data-error="1"]{color:#ff9b92}.lfmc-empty{padding:25px;text-align:center;color:#888;font-size:13px}.lfmc-tabtitle{font-size:21px;font-weight:750;margin-bottom:5px}.lfmc-toprow{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:16px}.lfmc-select{background:#252525;color:#eee;border:1px solid #444;padding:8px;border-radius:8px}
+  .lfmc-body{display:flex;min-height:0;flex:1}.lfmc-side{width:190px;padding:18px 12px;border-right:1px solid #303030;background:#191919}.lfmc-nav{display:flex;flex-direction:column;gap:5px}.lfmc-nav button{border:0;background:transparent;color:#aaa;text-align:left;padding:11px 12px;border-radius:9px;cursor:pointer;font-size:13px}.lfmc-nav button.active,.lfmc-nav button:hover{background:#302323;color:#fff}.lfmc-main{flex:1;overflow:auto;padding:24px}.lfmc-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.lfmc-card{background:#202020;border:1px solid #333;border-radius:13px;padding:15px;min-width:0}.lfmc-label{font-size:11px;color:#aaa;text-transform:uppercase;letter-spacing:.8px}.lfmc-number{font-size:25px;font-weight:750;margin-top:8px}.lfmc-muted{color:#999;font-size:12px}.lfmc-now{display:flex;align-items:center;gap:16px;margin:18px 0;padding:17px;background:linear-gradient(110deg,#321d20,#202020);border:1px solid #573032;border-radius:14px}.lfmc-cover{width:76px;height:76px;border-radius:9px;background:#333;object-fit:cover}.lfmc-track{font-weight:700;font-size:16px;overflow-wrap:anywhere}.lfmc-artist{font-size:13px;color:#bbb;margin-top:5px}.lfmc-pill{font-size:10px;background:#4a2424;color:#ffb4ae;padding:5px 8px;border-radius:30px;display:inline-block;margin-top:8px}.lfmc-section{font-size:15px;font-weight:700;margin:20px 0 10px}.lfmc-list{display:flex;flex-direction:column;gap:7px}.lfmc-row{display:flex;align-items:center;gap:11px;background:#202020;border:1px solid #303030;border-radius:10px;padding:9px 11px}.lfmc-row img{width:42px;height:42px;border-radius:6px;object-fit:cover;background:#333}.lfmc-rowinfo{min-width:0;flex:1}.lfmc-rowtitle{font-size:13px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lfmc-rowartist{font-size:11px;color:#999;margin-top:4px}.lfmc-btn{border:0;border-radius:9px;padding:10px 14px;background:#FF6A00;color:white;font-weight:650;cursor:pointer;font-size:12px}.lfmc-btn.secondary{background:#333;color:#eee}.lfmc-btn:disabled{opacity:.5;cursor:default}.lfmc-field{display:flex;flex-direction:column;gap:6px;margin:13px 0}.lfmc-field label{font-size:12px;color:#bbb}.lfmc-field input{background:#101010;border:1px solid #444;color:#fff;border-radius:8px;padding:10px 11px;outline:none}.lfmc-field input:focus{border-color:#FF6A00}.lfmc-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.lfmc-note{font-size:11px;color:#888;line-height:1.55;margin-top:12px}.lfmc-status{padding:10px 18px;border-top:1px solid #303030;color:#aaa;font-size:11px;display:flex;align-items:center;gap:10px;min-width:0}.lfmc-status[data-error="1"]{color:#ff9b92}.lfmc-log{position:relative;isolation:isolate;flex:1 1 auto;min-width:0;height:22px;max-height:22px;min-height:22px;overflow:hidden;margin:0 14px;padding:0 8px;background:#0f0f0f;border:1px solid #2a2a2a;border-radius:8px;font-family:Consolas,monospace;font-size:10px;color:#c0b7b1;line-height:20px;white-space:nowrap;--lfmc-progress:0%}.lfmc-log:before{content:"";position:absolute;z-index:-1;inset:0 auto 0 0;width:var(--lfmc-progress);background:linear-gradient(90deg,rgba(255,106,0,.38),rgba(255,145,76,.18));transition:width .28s ease}.lfmc-log div{position:relative;z-index:1;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:20px}.lfmc-version{flex:0 0 auto;white-space:nowrap}.lfmc-empty{padding:25px;text-align:center;color:#888;font-size:13px}.lfmc-tabtitle{font-size:21px;font-weight:750;margin-bottom:5px}.lfmc-toprow{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:16px}.lfmc-select{background:#252525;color:#eee;border:1px solid #444;padding:8px;border-radius:8px}
   @media(max-width:650px){#lfmc-panel{height:94vh}.lfmc-side{width:58px;padding:12px 6px}.lfmc-nav button{font-size:0;text-align:center;padding:12px 3px}.lfmc-nav button::first-letter{font-size:16px}.lfmc-main{padding:14px}.lfmc-grid{grid-template-columns:1fr 1fr}.lfmc-now{gap:10px}.lfmc-cover{width:58px;height:58px}}
+
+
+  /* Fmify 1.1.2 typography and native dropdowns */
+  #lfmc-overlay, #lfmc-overlay button, #lfmc-overlay input, #lfmc-overlay select, #lfmc-overlay textarea { font-family:"Satoshi",var(--font-family,Arial,sans-serif); }
+  #lfmc-panel select, #lfmc-panel .lfmc-select { color-scheme:dark; background-color:rgba(20,20,25,.94); }
+  #lfmc-panel select option { color:#f4f4f6; background:#19191f; }
+
+  /* Fmify 2.0 — Stage 1: design tokens + global visual foundation */
+  #lfmc-overlay {
+    --fm-bg: #0b0b0e;
+    --fm-surface: rgba(255,255,255,.055);
+    --fm-surface-strong: rgba(255,255,255,.085);
+    --fm-surface-hover: rgba(255,255,255,.105);
+    --fm-border: rgba(255,255,255,.105);
+    --fm-border-soft: rgba(255,255,255,.07);
+    --fm-text: #f5f5f7;
+    --fm-muted: #a1a1aa;
+    --fm-subtle: #777781;
+    --fm-orange: #ff6a00;
+    --fm-orange-light: #ff9a45;
+    --fm-orange-wash: rgba(255,106,0,.14);
+    --fm-orange-border: rgba(255,137,54,.27);
+    --fm-radius-sm: 10px;
+    --fm-radius-md: 14px;
+    --fm-radius-lg: 18px;
+    --fm-shadow: 0 24px 90px rgba(0,0,0,.58);
+    color: var(--fm-text);
+    color-scheme: dark;
+  }
+  #lfmc-overlay {
+    background: rgba(4,4,7,.34);
+    -webkit-backdrop-filter: blur(3px) saturate(110%);
+    backdrop-filter: blur(3px) saturate(110%);
+  }
+  #lfmc-panel {
+    background: linear-gradient(145deg, rgba(24,23,27,.97), rgba(12,12,16,.97));
+    color: var(--fm-text);
+    border: 1px solid var(--fm-border);
+    border-radius: 20px;
+    box-shadow: var(--fm-shadow), 0 0 0 1px rgba(255,255,255,.018) inset;
+  }
+  #lfmc-panel .lfmc-head {
+    background: linear-gradient(112deg, rgba(255,106,0,.105), rgba(255,255,255,.025) 48%, rgba(255,255,255,.012));
+    border-bottom: 1px solid var(--fm-border-soft);
+  }
+  #lfmc-panel .lfmc-side {
+    background: rgba(255,255,255,.022);
+    border-right: 1px solid var(--fm-border-soft);
+  }
+  #lfmc-panel .lfmc-nav { gap: 7px; }
+  #lfmc-panel .lfmc-nav button {
+    color: var(--fm-muted);
+    border: 1px solid transparent;
+    border-radius: 11px;
+    transition: background .18s ease, color .18s ease, border-color .18s ease, transform .18s ease;
+  }
+  #lfmc-panel .lfmc-nav button:hover {
+    color: var(--fm-text);
+    background: rgba(255,255,255,.055);
+    border-color: var(--fm-border-soft);
+  }
+  #lfmc-panel .lfmc-nav button.active {
+    color: #fff;
+    background: linear-gradient(100deg, rgba(255,106,0,.19), rgba(255,145,56,.075));
+    border-color: var(--fm-orange-border);
+    box-shadow: 0 5px 18px rgba(255,106,0,.075), inset 3px 0 0 var(--fm-orange);
+  }
+  #lfmc-panel .lfmc-card,
+  #lfmc-panel .lfmc-row {
+    background: var(--fm-surface);
+    border: 1px solid var(--fm-border);
+    border-radius: var(--fm-radius-md);
+    box-shadow: 0 8px 24px rgba(0,0,0,.10), inset 0 1px 0 rgba(255,255,255,.025);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+  }
+  #lfmc-panel .lfmc-now {
+    background: linear-gradient(115deg, rgba(255,106,0,.15), rgba(255,255,255,.045) 62%, rgba(255,255,255,.025));
+    border: 1px solid var(--fm-orange-border);
+    border-radius: var(--fm-radius-lg);
+    box-shadow: 0 12px 30px rgba(0,0,0,.16), inset 0 1px 0 rgba(255,255,255,.045);
+  }
+  #lfmc-panel .lfmc-pill {
+    background: var(--fm-orange-wash);
+    color: #ffb77f;
+    border: 1px solid rgba(255,106,0,.18);
+  }
+  #lfmc-panel .lfmc-btn {
+    background: linear-gradient(135deg, #ff7a1a, #ed5b00);
+    box-shadow: 0 5px 16px rgba(255,106,0,.16);
+    transition: transform .16s ease, filter .16s ease, box-shadow .16s ease;
+  }
+  #lfmc-panel .lfmc-btn:hover:not(:disabled) {
+    filter: brightness(1.08);
+    box-shadow: 0 7px 20px rgba(255,106,0,.23);
+    transform: translateY(-1px);
+  }
+  #lfmc-panel .lfmc-btn.secondary {
+    background: rgba(255,255,255,.075);
+    border: 1px solid var(--fm-border);
+    box-shadow: none;
+  }
+  #lfmc-panel .lfmc-btn.secondary:hover:not(:disabled) { background: rgba(255,255,255,.12); }
+  #lfmc-panel .lfmc-field input,
+  #lfmc-panel .lfmc-select,
+  #lfmc-panel select,
+  #lfmc-panel textarea {
+    background: rgba(0,0,0,.25);
+    border: 1px solid var(--fm-border);
+    color: var(--fm-text);
+    border-radius: var(--fm-radius-sm);
+  }
+  #lfmc-panel .lfmc-field input:focus,
+  #lfmc-panel .lfmc-select:focus,
+  #lfmc-panel select:focus,
+  #lfmc-panel textarea:focus {
+    border-color: rgba(255,137,54,.65);
+    box-shadow: 0 0 0 3px rgba(255,106,0,.12);
+    outline: none;
+  }
+  #lfmc-panel .lfmc-close {
+    background: rgba(255,255,255,.075);
+    border: 1px solid var(--fm-border);
+    transition: background .16s ease, transform .16s ease;
+  }
+  #lfmc-panel .lfmc-close:hover { background: rgba(255,255,255,.14); transform: rotate(90deg); }
+  #lfmc-panel .lfmc-status {
+    background: rgba(0,0,0,.16);
+    border-top: 1px solid var(--fm-border-soft);
+  }
+  #lfmc-panel .lfmc-muted,
+  #lfmc-panel .lfmc-note,
+  #lfmc-panel .lfmc-sub { color: var(--fm-muted); }
+  #lfmc-panel button:focus-visible,
+  #lfmc-panel a:focus-visible,
+  #lfmc-panel summary:focus-visible {
+    outline: 2px solid var(--fm-orange-light);
+    outline-offset: 3px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #lfmc-panel *, #lfmc-overlay * { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+  }
+
+
+
+
+  /* Fmify motion polish — subtle, fast and respectful */
+  @keyframes lfmc-overlay-in { from { opacity:0 } to { opacity:1 } }
+  @keyframes lfmc-panel-in {
+    from { opacity:0; transform:translateY(12px) scale(.985); filter:blur(4px); }
+    to { opacity:1; transform:translateY(0) scale(1); filter:blur(0); }
+  }
+  @keyframes lfmc-content-in {
+    from { opacity:0; transform:translateY(8px); }
+    to { opacity:1; transform:translateY(0); }
+  }
+  @keyframes lfmc-note-glow {
+    0%,100% { border-color:rgba(255,154,82,.17); }
+    50% { border-color:rgba(255,154,82,.34); }
+  }
+  #lfmc-overlay { animation:lfmc-overlay-in .2s ease-out both; }
+  #lfmc-panel { transform-origin:center; animation:lfmc-panel-in .28s cubic-bezier(.2,.75,.25,1) both; }
+  #lfmc-panel .lfmc-head,
+  #lfmc-panel .lfmc-side,
+  #lfmc-panel .lfmc-status { animation:lfmc-content-in .32s ease-out both; }
+  #lfmc-panel .lfmc-main > * { animation:lfmc-content-in .34s ease-out both; }
+  #lfmc-panel .lfmc-main > *:nth-child(2) { animation-delay:.035s; }
+  #lfmc-panel .lfmc-main > *:nth-child(3) { animation-delay:.07s; }
+  #lfmc-panel .lfmc-main > *:nth-child(4) { animation-delay:.105s; }
+  #lfmc-panel .lfmc-card,
+  #lfmc-panel .lfmc-row,
+  #lfmc-panel .lfmc-chart-panel {
+    transition:transform .2s cubic-bezier(.2,.7,.2,1), border-color .2s ease, box-shadow .2s ease, background .2s ease;
+  }
+  #lfmc-panel .lfmc-card:hover,
+  #lfmc-panel .lfmc-row:hover,
+  #lfmc-panel .lfmc-chart-panel:hover {
+    transform:translateY(-2px);
+    border-color:rgba(255,154,82,.25);
+    box-shadow:0 12px 28px rgba(0,0,0,.2), inset 0 1px 0 rgba(255,255,255,.035);
+  }
+  #lfmc-panel .lfmc-chart-item {
+    animation:lfmc-content-in .3s ease-out both;
+    transition:transform .18s ease, background .18s ease, border-color .18s ease;
+  }
+  #lfmc-panel .lfmc-chart-item:nth-child(1) { animation-delay:.025s; }
+  #lfmc-panel .lfmc-chart-item:nth-child(2) { animation-delay:.055s; }
+  #lfmc-panel .lfmc-chart-item:nth-child(3) { animation-delay:.085s; }
+  #lfmc-panel .lfmc-chart-item:nth-child(4) { animation-delay:.115s; }
+  #lfmc-panel .lfmc-chart-item:nth-child(5) { animation-delay:.145s; }
+  #lfmc-panel .lfmc-chart-item:hover {
+    transform:translateX(3px);
+    background:rgba(255,255,255,.075);
+    border-color:rgba(255,154,82,.24);
+  }
+  #lfmc-panel .lfmc-chart-item-art,
+  #lfmc-panel .lfmc-row img,
+  #lfmc-panel .lfmc-cover {
+    transition:transform .22s ease, filter .22s ease;
+  }
+  #lfmc-panel .lfmc-chart-item:hover .lfmc-chart-item-art,
+  #lfmc-panel .lfmc-row:hover img { transform:scale(1.045); filter:saturate(1.08); }
+  #lfmc-panel .lfmc-artwork-note { animation:lfmc-note-glow 3.8s ease-in-out infinite; }
+  #lfmc-panel .lfmc-nav button:active,
+  #lfmc-panel .lfmc-btn:active,
+  #lfmc-panel .lfmc-close:active { transform:scale(.97); }
+  @media (prefers-reduced-motion: reduce) {
+    #lfmc-overlay, #lfmc-panel, #lfmc-panel *,
+    #lfmc-panel .lfmc-artwork-note {
+      animation:none !important;
+      transition:none !important;
+      scroll-behavior:auto !important;
+    }
+  }
+
+  /* Charts-only artwork availability note */
+  #lfmc-panel .lfmc-artwork-note {
+    margin:0 0 14px; padding:9px 12px; border:1px solid rgba(255,154,82,.20);
+    border-radius:10px; background:linear-gradient(100deg,rgba(255,137,65,.09),rgba(255,255,255,.025));
+    color:var(--fm-muted); font-size:11px; line-height:1.45;
+  }
+  #lfmc-panel .lfmc-artwork-note strong { color:#ffad78; font-weight:600; }
+
+  /* v1.1.2 compact top-three chart cards */
+  #lfmc-panel .lfmc-chart-sections { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; align-items:stretch; }
+  #lfmc-panel .lfmc-chart-panel { min-width:0; padding:14px; border:1px solid rgba(255,255,255,.13); border-radius:16px; background:linear-gradient(150deg,rgba(255,255,255,.065),rgba(255,255,255,.025)); }
+  #lfmc-panel .lfmc-chart-panel .lfmc-section { margin:0 0 12px; }
+  #lfmc-panel .lfmc-listening-time { margin:0 0 16px; background:linear-gradient(120deg,rgba(255,106,0,.13),rgba(255,255,255,.045)); }
+  #lfmc-panel .lfmc-chart-sections { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  #lfmc-panel .lfmc-chart-grid { display:grid; grid-template-columns:1fr; grid-template-rows:84px repeat(4,64px); gap:8px; align-content:start; }
+  #lfmc-panel .lfmc-chart-item { box-sizing:border-box; width:100%; height:64px; min-height:64px; max-height:64px; display:flex; align-items:center; gap:9px; padding:7px 8px; overflow:hidden; border-radius:12px; background:rgba(255,255,255,.045); border:1px solid rgba(255,255,255,.075); }
+  #lfmc-panel .lfmc-chart-item-art { width:40px; height:40px; flex:0 0 40px; object-fit:cover; border-radius:8px; background:rgba(255,255,255,.08); }
+  #lfmc-panel .lfmc-chart-item.is-featured { box-sizing:border-box; height:84px; min-height:84px; max-height:84px; padding:8px; gap:10px; background:linear-gradient(135deg,rgba(255,135,58,.11),rgba(255,255,255,.045)); border-color:rgba(255,154,94,.22); }
+  #lfmc-panel .lfmc-chart-item.is-featured .lfmc-chart-item-art { width:64px; height:64px; flex-basis:64px; border-radius:9px; }
+  #lfmc-panel .lfmc-chart-item.is-featured .lfmc-chart-item-title { font-size:13px; }
+  #lfmc-panel .lfmc-chart-item.is-featured .lfmc-chart-item-sub { font-size:10px; }
+  #lfmc-panel .lfmc-chart-item.is-featured .lfmc-chart-item-meta { font-size:10px; }
+  #lfmc-panel .lfmc-chart-art-fallback { display:grid; place-items:center; color:#ff9a52; font-size:23px; }
+  #lfmc-panel .lfmc-chart-item-info { min-width:0; flex:1 1 auto; overflow:hidden; }
+  #lfmc-panel .lfmc-chart-item-title { font-size:12px; font-weight:700; line-height:1.3; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+  #lfmc-panel .lfmc-chart-item-sub { color:var(--fm-muted); font-size:10px; margin-top:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #lfmc-panel .lfmc-chart-item-meta { color:#ff9a72; font-size:10px; margin-top:4px; }
+  @media(max-width:1100px){ #lfmc-panel .lfmc-chart-sections { grid-template-columns:1fr; } }
+
+
+  /* Fmify 2.0 — Liquid Glass refinement */
+  #lfmc-overlay {
+    background:
+      radial-gradient(ellipse at 12% 8%, rgba(255,133,46,.075), transparent 34%),
+      radial-gradient(ellipse at 88% 92%, rgba(117,83,255,.055), transparent 36%),
+      rgba(5,5,9,.30);
+    -webkit-backdrop-filter: blur(3px) saturate(110%);
+    backdrop-filter: blur(3px) saturate(110%);
+  }
+  #lfmc-panel {
+    position: relative;
+    isolation: isolate;
+    background: linear-gradient(145deg, rgba(38,36,41,.88), rgba(15,15,20,.90) 58%, rgba(22,20,24,.88));
+    border: 1px solid rgba(255,255,255,.17);
+    box-shadow: 0 32px 100px rgba(0,0,0,.58), 0 1px 0 rgba(255,255,255,.14) inset, 0 -1px 0 rgba(255,255,255,.035) inset;
+    -webkit-backdrop-filter: blur(18px) saturate(145%);
+    backdrop-filter: blur(18px) saturate(145%);
+  }
+  #lfmc-panel::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    background: linear-gradient(132deg, rgba(255,255,255,.095), transparent 22%, transparent 72%, rgba(255,255,255,.025));
+    z-index: 0;
+  }
+  #lfmc-panel > * { position: relative; z-index: 1; }
+  #lfmc-panel .lfmc-head {
+    background: linear-gradient(105deg, rgba(255,255,255,.085), rgba(255,255,255,.025) 58%, rgba(255,106,0,.055));
+    border-bottom-color: rgba(255,255,255,.11);
+    box-shadow: 0 1px 0 rgba(255,255,255,.035) inset;
+  }
+  #lfmc-panel .lfmc-side {
+    background: linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.018));
+    border-right-color: rgba(255,255,255,.09);
+    -webkit-backdrop-filter: blur(22px);
+    backdrop-filter: blur(22px);
+  }
+  #lfmc-panel .lfmc-nav button {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 42px;
+    padding: 10px 12px;
+    font-weight: 560;
+    letter-spacing: -.1px;
+  }
+  #lfmc-panel .lfmc-nav-icon {
+    width: 17px;
+    height: 17px;
+    flex: 0 0 17px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: .9;
+  }
+  #lfmc-panel .lfmc-nav button[data-tab="overview"] .lfmc-nav-icon path { fill: currentColor; stroke: none; }
+  #lfmc-panel .lfmc-nav button.active .lfmc-nav-icon { color: #ff9a52; opacity: 1; }
+  #lfmc-panel .lfmc-card,
+  #lfmc-panel .lfmc-row {
+    background: linear-gradient(145deg, rgba(255,255,255,.085), rgba(255,255,255,.035));
+    border-color: rgba(255,255,255,.13);
+    box-shadow: 0 12px 30px rgba(0,0,0,.14), 0 1px 0 rgba(255,255,255,.09) inset;
+    -webkit-backdrop-filter: blur(20px) saturate(145%);
+    backdrop-filter: blur(20px) saturate(145%);
+  }
+  #lfmc-panel .lfmc-now {
+    background:
+      radial-gradient(ellipse at 0% 50%, rgba(255,106,0,.20), transparent 60%),
+      linear-gradient(115deg, rgba(255,255,255,.075), rgba(255,255,255,.025));
+    border-color: rgba(255,151,83,.27);
+    box-shadow: 0 14px 34px rgba(0,0,0,.17), 0 1px 0 rgba(255,255,255,.12) inset;
+  }
+  #lfmc-panel .lfmc-btn {
+    background: linear-gradient(135deg, rgba(255,133,48,.98), rgba(235,83,0,.96));
+    border: 1px solid rgba(255,214,184,.24);
+    box-shadow: 0 5px 18px rgba(255,106,0,.19), 0 1px 0 rgba(255,255,255,.2) inset;
+  }
+  #lfmc-panel .lfmc-btn.secondary,
+  #lfmc-panel .lfmc-close {
+    background: linear-gradient(145deg, rgba(255,255,255,.105), rgba(255,255,255,.045));
+    border: 1px solid rgba(255,255,255,.14);
+    box-shadow: 0 1px 0 rgba(255,255,255,.08) inset;
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+  }
+  #lfmc-panel .lfmc-field input,
+  #lfmc-panel .lfmc-select,
+  #lfmc-panel select,
+  #lfmc-panel textarea {
+    background: rgba(0,0,0,.22);
+    border-color: rgba(255,255,255,.14);
+    box-shadow: 0 1px 0 rgba(255,255,255,.045) inset;
+  }
+  #lfmc-panel .lfmc-status {
+    background: rgba(0,0,0,.16);
+    border-top-color: rgba(255,255,255,.085);
+  }
+  @media(max-width:650px) {
+    #lfmc-panel .lfmc-nav button { justify-content: center; gap: 0; }
+    #lfmc-panel .lfmc-nav button span { display: none; }
+    #lfmc-panel .lfmc-nav-icon { width: 19px; height: 19px; flex-basis: 19px; }
+  }
+
+  /* Fmify 1.2 navigation and service cards */
+  #lfmc-panel .lfmc-body{flex-direction:column-reverse;min-height:0}
+  #lfmc-panel .lfmc-side{width:100%;padding:8px 10px;border-right:0;border-top:1px solid rgba(255,255,255,.09);background:rgba(10,10,14,.82)}
+  #lfmc-panel .lfmc-nav{display:flex;flex-direction:row;justify-content:space-between;gap:4px}
+  #lfmc-panel .lfmc-nav button{flex:1;min-width:0;min-height:54px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:3px;padding:5px 2px;text-align:center;font-size:10px;color:#eee}
+  #lfmc-panel .lfmc-nav-icon{font-size:18px;line-height:20px;color:#fff}
+  #lfmc-panel .lfmc-nav button.active{background:linear-gradient(180deg,rgba(255,106,0,.22),rgba(255,106,0,.06));color:#ff9a52;box-shadow:0 -2px 0 #ff6a00 inset}
+  #lfmc-panel .lfmc-main{flex:1 1 auto;min-height:0}
+  @media(max-width:650px){#lfmc-panel .lfmc-nav button{font-size:8px}.lfmc-grid{grid-template-columns:1fr 1fr}}
+
+  /* Fmify dashboard refresh — centered glass home and bottom navigation */
+  #lfmc-overlay {
+    padding: 4vh 4vw;
+    background:
+      radial-gradient(ellipse at 3% 5%, rgba(255,91,0,.22), transparent 24%),
+      radial-gradient(ellipse at 96% 96%, rgba(255,91,0,.18), transparent 25%),
+      rgba(0,0,0,.76);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+  }
+  #lfmc-panel {
+    position:relative;
+    isolation:isolate;
+    width:min(1568px,94vw);
+    height:min(748px,86vh);
+    min-height:560px;
+    border-radius:34px;
+    border:1px solid rgba(255,255,255,.17);
+    background:linear-gradient(145deg,rgba(13,13,15,.985),rgba(8,8,10,.99));
+    box-shadow:0 30px 110px rgba(0,0,0,.72),0 0 0 1px rgba(255,255,255,.025) inset;
+  }
+  #lfmc-panel:before {
+    content:"";position:absolute;inset:-1px;z-index:-1;pointer-events:none;border-radius:inherit;
+    background:radial-gradient(ellipse at 0% 0%,rgba(255,91,0,.19),transparent 26%),radial-gradient(ellipse at 100% 100%,rgba(255,91,0,.17),transparent 25%);
+  }
+  #lfmc-panel .lfmc-head {
+    height:78px;flex:0 0 78px;padding:0 30px 0 32px;
+    border:0;background:transparent;
+  }
+  #lfmc-panel .lfmc-brand{gap:13px}
+  #lfmc-panel .lfmc-logo{
+    width:34px;height:34px;flex:0 0 34px;border-radius:50%;
+    display:grid;place-items:center;background:#f8f8f8;color:#111;
+    filter:none;font-size:22px;font-weight:900;
+  }
+  #lfmc-panel .lfmc-logo span{transform:rotate(-8deg);display:block;line-height:1}
+  #lfmc-panel .lfmc-title{font-size:24px;font-weight:700;letter-spacing:-.7px}
+  #lfmc-panel .lfmc-head-version{font-size:11px;color:#ff8735;margin-left:7px;vertical-align:middle;font-weight:600}
+  #lfmc-panel .lfmc-sub{display:none}
+  #lfmc-panel .lfmc-close{
+    width:38px;height:38px;border-radius:50%;background:transparent;border:0;
+    font-size:27px;color:#eee;line-height:1;
+  }
+  #lfmc-panel .lfmc-body{display:flex;flex:1;min-height:0;overflow:hidden}
+  #lfmc-panel .lfmc-main{padding:8px 34px 10px;overflow:auto}
+  #lfmc-panel .lfmc-bottom{
+    flex:0 0 auto;padding:0 6%;margin:0 0 28px;
+    background:transparent;border:0;
+  }
+  #lfmc-panel .lfmc-nav{
+    min-height:128px;padding:10px 16px;display:flex;flex-direction:row;
+    align-items:stretch;justify-content:space-around;gap:6px;
+    border:1px solid rgba(255,255,255,.105);border-radius:72px;
+    background:rgba(255,255,255,.025);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.025);
+  }
+  #lfmc-panel .lfmc-nav button{
+    flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;
+    padding:10px 8px;border:1px solid transparent;border-radius:30px;background:transparent;
+    color:#f4f4f5;text-align:center;font-size:16px;font-weight:500;
+  }
+  #lfmc-panel .lfmc-nav-icon{
+    height:34px;min-height:34px;display:grid;place-items:center;
+    color:#f5f5f5;font-size:34px;font-weight:600;line-height:1;
+  }
+  #lfmc-panel .lfmc-nav-icon.lfmc-lb-icon{font-size:25px;font-weight:800;letter-spacing:-2px}
+  #lfmc-panel .lfmc-nav button:hover{background:rgba(255,255,255,.055);border-color:transparent}
+  #lfmc-panel .lfmc-nav button.active{
+    color:#fff;border:1px solid rgba(255,106,0,.95);
+    background:linear-gradient(145deg,#ff790d,#e95a00);
+    box-shadow:0 0 0 1px rgba(255,106,0,.18),0 0 24px rgba(255,106,0,.55),0 0 48px rgba(255,106,0,.22);
+    inset:auto;
+  }
+  #lfmc-panel .lfmc-nav button.active .lfmc-nav-icon{color:#fff}
+  #lfmc-panel .lfmc-status{display:none}
+  #lfmc-panel .lfmc-home{
+    min-height:100%;height:100%;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;text-align:center;padding:4px 12px 18px;
+  }
+  #lfmc-panel .lfmc-home-hero{margin:0 0 44px}
+  #lfmc-panel .lfmc-home-wordmark{
+    font-size:clamp(66px,7vw,112px);font-weight:800;font-style:italic;
+    letter-spacing:-7px;line-height:1.05;color:#f7f7f7;
+  }
+  #lfmc-panel .lfmc-home-wordmark span{color:#ff6a00}
+  #lfmc-panel .lfmc-home-tagline{font-size:clamp(17px,1.8vw,30px);font-weight:600;color:#b9b9bd;margin-top:18px}
+  #lfmc-panel .lfmc-service-row{display:flex;align-items:center;justify-content:center;gap:36px;flex-wrap:wrap}
+  #lfmc-panel .lfmc-service-chip{
+    min-width:250px;min-height:88px;padding:13px 24px;display:flex;align-items:center;gap:17px;
+    color:#f5f5f5;text-align:left;border:1px solid rgba(255,255,255,.10);border-radius:50px;
+    background:rgba(255,255,255,.035);box-shadow:inset 0 1px 0 rgba(255,255,255,.025);
+    cursor:pointer;transition:background .18s ease,border-color .18s ease,transform .18s ease;
+  }
+  #lfmc-panel .lfmc-service-chip:hover{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.2);transform:translateY(-2px)}
+  #lfmc-panel .lfmc-service-logo{
+    width:52px;height:52px;flex:0 0 52px;border-radius:50%;display:grid;place-items:center;
+    color:white;font-size:27px;font-weight:800;
+  }
+  #lfmc-panel .lfmc-lastfm-logo{background:#e51d2a}
+  #lfmc-panel .lfmc-listenbrainz-logo{background:#0868e9;font-size:25px;letter-spacing:-2px}
+  #lfmc-panel .lfmc-statsfm-logo{background:transparent;color:#10d977;font-size:43px}
+  #lfmc-panel .lfmc-service-copy{display:flex;flex-direction:column;gap:5px}
+  #lfmc-panel .lfmc-service-copy strong{font-size:20px;font-weight:600}
+  #lfmc-panel .lfmc-service-copy small{font-size:17px;color:#10d977;display:flex;align-items:center;gap:8px}
+  #lfmc-panel .lfmc-service-copy small i,#lfmc-panel .lfmc-home-meta i{
+    width:10px;height:10px;border-radius:50%;display:inline-block;background:#777;
+  }
+  #lfmc-panel .lfmc-service-copy small i.is-connected,#lfmc-panel .lfmc-home-meta i.is-connected{background:#10d977;box-shadow:0 0 10px rgba(16,217,119,.35)}
+  #lfmc-panel .lfmc-home-lower{margin-top:26px;min-height:36px}
+  #lfmc-panel .lfmc-home-now{display:flex;flex-direction:column;gap:5px;color:#eee;font-size:13px}
+  #lfmc-panel .lfmc-home-now-label{font-size:10px;letter-spacing:1.3px;color:#ff9a45}
+  #lfmc-panel .lfmc-home-now span{color:#aaa}
+  #lfmc-panel .lfmc-home-meta{display:flex;gap:22px;justify-content:center;color:#777;font-size:11px}
+  #lfmc-panel .lfmc-home-meta span{display:flex;align-items:center;gap:7px}
+  @media(max-width:900px){
+    #lfmc-panel{width:96vw;height:92vh;min-height:520px;border-radius:22px}
+    #lfmc-panel .lfmc-bottom{padding:0 3%;margin-bottom:18px}
+    #lfmc-panel .lfmc-nav{min-height:92px;padding:7px;border-radius:42px}
+    #lfmc-panel .lfmc-nav button{font-size:12px;gap:4px;padding:6px 3px}
+    #lfmc-panel .lfmc-nav-icon{font-size:25px;height:27px;min-height:27px}
+    #lfmc-panel .lfmc-service-row{gap:12px}
+    #lfmc-panel .lfmc-service-chip{min-width:190px;min-height:70px;padding:10px 16px}
+    #lfmc-panel .lfmc-service-logo{width:42px;height:42px;flex-basis:42px}
+    #lfmc-panel .lfmc-service-copy strong{font-size:16px}
+    #lfmc-panel .lfmc-service-copy small{font-size:13px}
+  }
+  @media(max-width:620px){
+    #lfmc-panel .lfmc-home-hero{margin-bottom:25px}
+    #lfmc-panel .lfmc-service-row{flex-direction:column;width:100%}
+    #lfmc-panel .lfmc-service-chip{width:min(100%,310px)}
+    #lfmc-panel .lfmc-nav button{font-size:9px}
+    #lfmc-panel .lfmc-nav-icon{font-size:20px}
+  }
+
+  /* Fmify 1.2.2 — compact, minimal bottom navigation */
+  #lfmc-panel .lfmc-bottom{
+    padding:0 8%;
+    margin:0 0 22px;
+  }
+  #lfmc-panel .lfmc-nav{
+    min-height:78px;
+    padding:6px 10px;
+    gap:3px;
+    border-radius:42px;
+    background:rgba(255,255,255,.018);
+    border-color:rgba(255,255,255,.085);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.018);
+  }
+  #lfmc-panel .lfmc-nav button{
+    gap:3px;
+    padding:5px 5px;
+    border-radius:22px;
+    font-size:12px;
+    font-weight:500;
+    color:rgba(255,255,255,.84);
+  }
+  #lfmc-panel .lfmc-nav-icon{
+    height:23px;
+    min-height:23px;
+    font-size:23px;
+    opacity:.88;
+  }
+  #lfmc-panel .lfmc-nav-icon.lfmc-lb-icon{font-size:19px}
+  #lfmc-panel .lfmc-nav button.active{
+    border-color:rgba(255,106,0,.72);
+    background:linear-gradient(145deg,rgba(255,121,13,.94),rgba(233,90,0,.94));
+    box-shadow:0 0 14px rgba(255,106,0,.28),inset 0 1px 0 rgba(255,255,255,.12);
+  }
+  #lfmc-panel .lfmc-nav button.active .lfmc-nav-icon{opacity:1}
+  @media(max-width:900px){
+    #lfmc-panel .lfmc-bottom{padding:0 4%;margin-bottom:16px}
+    #lfmc-panel .lfmc-nav{min-height:70px;padding:5px 7px}
+    #lfmc-panel .lfmc-nav button{font-size:11px;gap:2px}
+    #lfmc-panel .lfmc-nav-icon{height:21px;min-height:21px;font-size:21px}
+  }
+  @media(max-width:620px){
+    #lfmc-panel .lfmc-nav{min-height:62px;padding:4px;border-radius:28px}
+    #lfmc-panel .lfmc-nav button{font-size:8px;padding:4px 1px}
+    #lfmc-panel .lfmc-nav-icon{height:18px;min-height:18px;font-size:18px}
+  }
+
+  /* Fmify 1.2.3 — floating seven-tab navigation; retain the redesigned home UI */
+  #lfmc-panel{position:relative;}
+  #lfmc-panel .lfmc-body{min-height:0;overflow:hidden;}
+  #lfmc-panel .lfmc-main{padding-bottom:132px;}
+  #lfmc-panel .lfmc-bottom{
+    position:absolute;
+    z-index:20;
+    left:6%;
+    right:6%;
+    bottom:20px;
+    width:auto;
+    margin:0;
+    padding:0;
+    flex:none;
+    pointer-events:none;
+  }
+  #lfmc-panel .lfmc-nav{
+    min-height:70px;
+    height:70px;
+    padding:5px 8px;
+    gap:4px;
+    border:1px solid rgba(255,255,255,.13);
+    border-radius:40px;
+    background:rgba(18,18,21,.78);
+    -webkit-backdrop-filter:blur(22px) saturate(140%);
+    backdrop-filter:blur(22px) saturate(140%);
+    box-shadow:0 12px 38px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.06);
+    pointer-events:auto;
+  }
+  #lfmc-panel .lfmc-nav button{
+    min-height:58px;
+    gap:3px;
+    padding:4px 3px;
+    border-radius:28px;
+    font-size:11px;
+    font-weight:550;
+  }
+  #lfmc-panel .lfmc-nav-icon{
+    height:22px;
+    min-height:22px;
+    font-size:22px;
+  }
+  #lfmc-panel .lfmc-nav-icon.lfmc-lb-icon{font-size:18px;}
+  #lfmc-panel .lfmc-nav button.active{
+    border-color:rgba(255,106,0,.75);
+    background:linear-gradient(145deg,#ff790d,#e95a00);
+    box-shadow:0 0 16px rgba(255,106,0,.3),inset 0 1px 0 rgba(255,255,255,.16);
+  }
+  @media(max-width:900px){
+    #lfmc-panel .lfmc-bottom{left:4%;right:4%;bottom:15px;}
+    #lfmc-panel .lfmc-main{padding-bottom:112px;}
+    #lfmc-panel .lfmc-nav{height:64px;min-height:64px;padding:4px 6px;}
+    #lfmc-panel .lfmc-nav button{min-height:54px;font-size:10px;}
+    #lfmc-panel .lfmc-nav-icon{height:20px;min-height:20px;font-size:20px;}
+  }
+  @media(max-width:620px){
+    #lfmc-panel .lfmc-bottom{left:3%;right:3%;bottom:10px;}
+    #lfmc-panel .lfmc-main{padding-bottom:96px;}
+    #lfmc-panel .lfmc-nav{height:58px;min-height:58px;padding:3px;border-radius:30px;gap:1px;}
+    #lfmc-panel .lfmc-nav button{min-height:50px;font-size:8px;padding:3px 1px;}
+    #lfmc-panel .lfmc-nav-icon{height:17px;min-height:17px;font-size:17px;}
+  }
+
+
+  /* v1.2.4 — crisp brand marks, image-led top-five rankings and Spotify Mix font stack */
+  #lfmc-overlay, #lfmc-overlay * {
+    font-family:"Spotify Mix Medium","Spotify Mix","SpotifyMixUI","SpotifyMixUITitle","Satoshi",var(--font-family,Arial,sans-serif) !important;
+  }
+  #lfmc-panel .lfmc-nav-icon{width:24px;height:24px;min-height:24px;display:grid;place-items:center;font-size:initial;line-height:1;color:#fff}
+  #lfmc-panel .lfmc-nav-icon svg{display:block;width:23px;height:23px;overflow:visible}
+  #lfmc-panel .lfmc-nav button.active .lfmc-nav-icon{color:#fff}
+  #lfmc-panel .lfmc-service-logo{display:grid;place-items:center;overflow:hidden}
+  #lfmc-panel .lfmc-service-logo svg{display:block;width:27px;height:27px}
+  #lfmc-panel .lfmc-lastfm-logo svg{width:29px;height:29px}
+  #lfmc-panel .lfmc-listenbrainz-logo svg{width:31px;height:31px}
+  #lfmc-panel .lfmc-statsfm-logo{color:#10d977}
+  #lfmc-panel .lfmc-statsfm-logo svg{width:34px;height:34px}
+  #lfmc-panel .lfmc-rank-sections{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px;align-items:start;margin-top:16px}
+  #lfmc-panel .lfmc-rank-section{min-width:0;padding:13px;border:1px solid rgba(255,255,255,.10);border-radius:15px;background:linear-gradient(145deg,rgba(255,255,255,.045),rgba(255,255,255,.018))}
+  #lfmc-panel .lfmc-rank-section .lfmc-section{margin:0 0 11px}
+  #lfmc-panel .lfmc-rank-list{display:flex;flex-direction:column;gap:7px}
+  #lfmc-panel .lfmc-rank-item{display:flex;align-items:center;gap:9px;min-width:0;min-height:49px;padding:6px 8px;border:1px solid rgba(255,255,255,.065);border-radius:11px;background:rgba(255,255,255,.035)}
+  #lfmc-panel .lfmc-rank-item.is-featured{min-height:86px;padding:9px;background:linear-gradient(125deg,rgba(255,106,0,.13),rgba(255,255,255,.045));border-color:rgba(255,154,82,.24)}
+  #lfmc-panel .lfmc-rank-number{flex:0 0 20px;color:#ff9a52;font-size:10px;font-weight:750;text-align:center}
+  #lfmc-panel .lfmc-rank-art{width:36px;height:36px;flex:0 0 36px;object-fit:cover;border-radius:7px;background:rgba(255,255,255,.08)}
+  #lfmc-panel .lfmc-rank-item.is-featured .lfmc-rank-art{width:66px;height:66px;flex-basis:66px;border-radius:10px}
+  #lfmc-panel .lfmc-rank-placeholder{display:grid;place-items:center;color:#ff9a52;font-size:18px}
+  #lfmc-panel .lfmc-rank-info{flex:1;min-width:0}
+  #lfmc-panel .lfmc-rank-title{font-size:11px;font-weight:650;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #lfmc-panel .lfmc-rank-item.is-featured .lfmc-rank-title{font-size:13px;font-weight:750;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  #lfmc-panel .lfmc-rank-sub{font-size:10px;color:var(--fm-muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #lfmc-panel .lfmc-rank-count{font-size:9px;color:#ffad78;margin-top:3px}
+  @media(max-width:1050px){#lfmc-panel .lfmc-rank-sections{grid-template-columns:1fr}}
+  @media(max-width:650px){#lfmc-panel .lfmc-rank-section{padding:10px}#lfmc-panel .lfmc-rank-item.is-featured .lfmc-rank-art{width:56px;height:56px;flex-basis:56px}}
+
+  /* v1.2.7 — prevent content grids from forcing the panel wider than its viewport */
+  #lfmc-panel, #lfmc-panel *{box-sizing:border-box;}
+  #lfmc-panel .lfmc-body{min-width:0;width:100%;max-width:100%;}
+  #lfmc-panel .lfmc-main{flex:1 1 0;min-width:0;width:0;max-width:100%;overflow-x:hidden;}
+  #lfmc-panel #lfmc-content{display:block;min-width:0;width:100%;max-width:100%;}
+  #lfmc-panel .lfmc-grid{display:grid;width:100%;max-width:100%;min-width:0;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));}
+  #lfmc-panel .lfmc-grid > *, #lfmc-panel .lfmc-rank-sections > *{min-width:0;max-width:100%;}
+  #lfmc-panel .lfmc-rank-sections{width:100%;max-width:100%;min-width:0;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));}
+  #lfmc-panel .lfmc-rank-section{width:100%;min-width:0;overflow:hidden;}
+  #lfmc-panel .lfmc-rank-item{width:100%;min-width:0;}
+  #lfmc-panel .lfmc-rank-info{min-width:0;overflow:hidden;}
+  #lfmc-panel .lfmc-rank-title,#lfmc-panel .lfmc-rank-sub{max-width:100%;}
+  @media(max-width:760px){
+    #lfmc-panel .lfmc-main{padding-left:16px;padding-right:16px;}
+    #lfmc-panel .lfmc-rank-sections{grid-template-columns:minmax(0,1fr);}
+    #lfmc-panel .lfmc-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));}
+  }
+  @media(max-width:480px){#lfmc-panel .lfmc-grid{grid-template-columns:minmax(0,1fr);}}
   `;
-  function injectStyles(){if(document.getElementById("lfmc-style"))return;const s=document.createElement("style");s.id="lfmc-style";s.textContent=css;document.head.appendChild(s);}
+  function injectStyles(){if(document.getElementById("lfmc-style"))return;const font=document.createElement("link");font.rel="stylesheet";font.href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,600,700,800&display=swap";font.id="lfmc-satoshi-font";document.head.appendChild(font);const s=document.createElement("style");s.id="lfmc-style";s.textContent=css;document.head.appendChild(s);}
   function createLauncher(){
     if(document.getElementById("lfmc-launch"))return;
     const b=document.createElement("button");
@@ -304,16 +1020,48 @@
     window.__lfmcProfileMenuObserver = observer;
   }
 
-  function openDashboard(){if(document.getElementById("lfmc-overlay")){return;}
-    const overlay=document.createElement("div");overlay.id="lfmc-overlay";overlay.addEventListener("click",e=>{if(e.target===overlay)overlay.remove();});
-    overlay.innerHTML=`<section id="lfmc-panel"><header class="lfmc-head"><div class="lfmc-brand"><img class="lfmc-logo" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAABXLUlEQVR42u39eZxmV3Xei3/X3ue8U43dVdWTetDcmhEIAWKShBEyxhAMtDAxtomn64tN7OApTrAlkTi+dvwLubGd2HFwbAKxoXFsQ0zEKAmQhdCEQGOrW93qubvmqnc6w97r98c+531PtbCtqYmvo/fzaam6pq46e+01POtZz4IXXv9feUnx54XXC68XXi+8Xni98Hrh9cLrO5Z8vPB64fWCUfxDfJkXHsELrxc8xAsH9b//51CAG8PPs/vhXX/zz7Xr6b1799/x5buf6U+4+7l8Mey66CK9Cbjp5pu1+OX0O3jG+mwNQP6OH7T8+mf0yyjI7l27zK6LTgoXb1C5Ybf7P+3mqd5obrsJM/vww7pr924vz59ByN/+6P83egC98UbDTQ+LyFMO3Nz3y989tW7KT9WJR9T4hqiNGvXI2dj6xOU2sqJRvWaIVSIba25Ucu80qreUuoRcJmoQ1UVRr3kOkTWKGIGcXE345X1uICJPvTZGa0qek+c5eCk+7gzOC9YoXj1eDJlTvFc0NrlLJcqMZoqL1GieQe68ZECmTpOuMX1jxOaRt7H1S4na5dW2iY1NbC1bIc2Xbtu9e+Hmh0nXPJtP7LK7d8MNu5/zZXheDeBZ3fCn/Kuf2GXZdZGK3OwB/uvVOxr/6J0vvTL17up+L31Jv98/v9vNN7Z72USauTj4nXAGRpS4ZjFGMUYwRrEGajXBRCAGjBUwhiiOUPVEscWrogiCIhJ+FVXFGNDCCXsFdYo6B6b4Gh/e7zzkefi7KngVvDc4Fz6WZUrmDbkLTyd1gsPSzyHxlsyBR8jV4oqnF0eSjTXrndGamZ1smP2bJmp3NzT7ylc/+9BXf+jz3+wEz6Cy+4YbzHMwhKrXludiAH/nF//dNx7DTTdSHvzsH+y6omb8e5KV1TeePLl8zhOHlzkwnzLXE050YL6nPsOqQ1QRTOEXY2sRK6jzWAORQGwFvMeIYiX8eCIKCrE1OOdRQVCPlXD4iEEE9apgDN55yZ2i4avJnMcreI96BKeIRzTzKl4hd15zFTyI8+DU41QQEXIFMYbcezLnFRVBRLV4bOq91K2Y0UhkXcOwfbLOxVvGOGfjCNvW1Q5MjdvPpYn/yJn/8n/dMbw0u73IM37u1Ut76tvP2gM8YyPQW6+O5Nrbc4C5j/3j14/Ukn+2eujo9Sf2z9r7962yrzPilhubXD4yI9qakHhkQhojo1JrjOABr4rLPc47cufIsiwcKh7vPWma4orr51XxPrwfDZ5bgDx34eDR4vYbvPeoKqo+fBwQAec83vnwtRKelfpwfF4V78rvVRgbhKhAMDoRUO8Hv79XHT489fg8Q9QpeQZ5qrFPNcp6OiF9c8G0ja4+b5zzd0yyafv6z6ys6m9t/rnP3VoawjPMkeTpuP6/ywD+Jit6GskNAioi4k/+pzedN3b25K/buSNvn//GHr65p+cOR2e6dPPFprntAjNxxtnUxtYhUQ2wZLmj0+myvNKm3V5hcWGJLEu13+9JkiSkWUqaJuRZVhhEjnOq3ufivQuH68MtBk+e54ND08JIhn/3eKcgFAYRwrwvfT4aYJLi3qj68ACK/xgxaOWRhF5t+LuIQQBjhMhajAjWCLE1xEaIDcQ+I3J94rxDI2/7CW37HfXEXnPBmD37iq0wtf6/7fnD+/75FV+YP3rrrTdG1157c/4sEnb5Nkaw5vPkeb31N95o5OYPelB6t/7E+yKz9MHoofsnDz5wPDsen4M7/zo7fvl3M7LpTKJak16vz9LKCisrqywtt1laXNLllRU6nR7HT5yQhflZvKqmaSJ5kazlWYZzGc45dc5R/lH1qKqoBo+gquiaA9fKH49XHRxmeF8wGtXwuagqgkjxOML3DxaOoOWHhMofofAe4akZAWNErQiRiNQiQ2wNNSu0rDBWN0w3IyYkpZYuEeWrbGnm7sVTTi557booPe/SJ3uPLf3k5E9/9RbVT1iRG9xzSAqflgE8I/dxalkjcrM/cgWtmQ+//w9iv+8fZ7d+laXZRpbufJttvvI9jGy/hDTJWF5cZGWlTXu1w0q7TafTp93tsry8qr1+wuzsSZ7Y/wT9Xj8cep6KczlZnuN9jncO5304/NzpwP2jawyhPNjy7eK4n2IYpREEbz40jHDYMnBtDD4W3m0KCyhvvyk+V0CFwgBExBjRWBArEBshMtCwMBIpY7Gwvi5sbcGWVs4ES6yznnNnyKdfP1bzL/pHpI8c/+nmW3b/rt56YyR/tyd4Rq/o+appRW72s7/d3DL5pl/8iyh94MrsS19M08ZltnXDz9v1l74Z75Tl2VlW2x263T6dXp9ur0ev26Pb7ZEkCbnL5ciRwzyxb5/2+h1yl0uWpurVkedO89yh3kt54MHtu8GtHrpyr+q1OBZFvRcto1nl9lcPexDftRLXK7lTecML1EqRAF5JmRMUlUaIf+GvhQEgDtHCKlwoWMgtZE5JHHScZ955barI5qkGW9elUKtF2QHN7cUPauONP/07/Vu3rZdrb/5Xz7cRyPNy+OaDvv3Jqc2N1/7OZ232mUvzO/5XotF1Ma/4FeymC+jNHqez2qHbz+h0e3S6fVZW2/T6KWnuWVxe1oMHD8sT+x5ndm6WLM81z3Nyl0meOc1dHhJA9cEAdJiwVVx94aGL5G0Qsyuuv7zVRbk1cHDD7K58U6quHRRTuviioBRCDAg3P7zfoIiIImARCV6i8A6FQUQCkYHIKHWjtCIYj5X1sep0Qzmjlcvl0wkXv/EleBmH+BG1r3uNN/UL4u7d+94/ct2HP/R8GoE8t8MnFGr/VGr5TV/6ajT+0EvzO/9TQvrKWK76TVQi+rPH6Sa5dLuJtjs92r0+nV5KP0lZWWnz5MFDPLbnUU6cOEmSpaGMyjLNspy8cPXhlnvxbpjtl3G8zLyHbj6YQtXtr4nhFXcfzm+Y2snA1TM41HDQQwMoDlRBxSBYYY0RlJBDeeCmSAtM0Xkry1ZrIDbQMMpIpExYr+vqno0tJ2eNOF6ytcvWd99A7tbhD35Ma+dv8Ey/PG5/a+GdY7s++4lnUR2cDgNQKyI+ffKj/z3eXvv+/N7fSCV9WcTl/wbfXSFbnKeTeNrdhHY3YaXTo5/m9DPPE3v38q0HvsGJ2TlS58hUybKcfpJqljty73AuH2TvZQbvAiIzTPR0TTwPjl2HB1m4cyluf5HCDb5CCghBhy6+OGwGhyaCanDnyNAAwIqKEcGuDRFqUDECVgQ05AalgVAYixElNlATaFjPiFUdiVVmGo4zmk7PG/dcsj1h6u1vkvxkRP7gV3xth4dzXtqZ/Ub7NZt+7mvf0hsxcjP+f0sOcOutN0Yikvfu/uX3xWMPfr+77U8SeG3MS34ZXT5KtrBAu+9p9zJWewntbnD3cyfn+MY9d7P/wAG6WU4uhjTLSbKcLHckRb3vvBfvnXrvxQ9LNFXvixvupfTeZczWQfnGIKsvCn0lJIYyrOS0kuGqSBH11952JRLUlC4cMMGEEAGLakRI7soSUCHc8KE3CIc/TBCL76WYIg9xHlJBIgcrmRCH76n2SE3O+5O/0o2vvliWzJRxdxx0G5bvmRjfeOYf33r11S/j4g2q7Jbn0kd4Vh5Ab7zRyAc/6Pt/9u7zo/Oa98gj/7OZrGyS2vX/UbyP6M/P0+krq72U1V5Kp5+ROWHfnj3ce9edLK62STH0ckc/daRZTuYcufPF/4PrV9WQ4auKer+mjCtvuYYgL2VOVyTghdf3A6CHAS6zJuAPa/jihtryAEUxxeFaUSyF6y6yQ1N8w0gQK1rNDYLxhG84yCWMSBlmRIqvNRIMLjIQG6URQdMqE9bpZF3Z3PKybcTr9rFUdlw2yZ5vpWTL3fzFr5mudcbW//PR9+35jecaCp6dB7gJbrxZDZP579iHbx1bfpis9ob3mbzvaB8/wmoK7X5Gp5/TS3L6Sc5D37ifhx76Ft1cSRW6SUIvSTXNPalz5N6L80runDrnxWnI5ItDL+O6hCNXVS3d9zCXZ03MVwKgKwyD/7dpQhdfrFXkTsAYldhA3YZDt0X8RjUYhAy8goZQUJR+lWtVVgGsQdWGngDRgddRVckdmip01ASE06OZh45raPvetqxbH/GNY5FNb593O1/GBx75mam/YNfuPc8lFDxjA9BP7LIiN7vOp7/v++pze687evuhNLn4B6KpsbNY3n+Adi50ehntbhIOP8351n33svfxx0kwdNOcfuHyk8xJ6lzA4L0GbD24/0qMryR04bqHi1a44go8F2558X4zeFdZ569xd8EqfHn4az4TB5I5SI1Sd8qoVUZqQst4rKiWZaQVJSI0p6wMwR8h9AtKjGAIHYg6lVCGGkGK7oUpfgbvIRdIVCAnBIq+kHpluR/p+YJMTBi564DPRx9bHd187sS/FOGH9BNPi9n1rHoB3y7xk9tuusa+dKe9u3/3fS96tH9mvuWtv2j7udIpDr3XT+kmOUnm+MY997B//36ctXSTjF6akWWO1DnSPBy+8x7nQ7LnVNWHeK3Dg6/AsKpyaukma8s3reJXUjzcULqX2ACilexfVdd2S4KnURlgAEpNlDHrZGvLM1P3tGzoGuYerKBREesVFT94rMHZe2XwrwcDKD4mgtNhdLKg1oAxIrHxNCy0YhiPlLGa6kSkcvZ64b4jqTa94/VXTiSNZvPFW//d0afjBb6tAUTP/PaLm/vw1W+Vg4cvv+uRLIted61dzuvMHT9G5qCfZnT7KZmDxx97lMf27sUZS7/bJ0kzMudJnSfLHSHb9wyTvHC7Bofv/ZravVLYU3WsUlKKhMqjr4KYRaJYutuyLig+7Fnz7WWYSOggucs8zDnDYmoYs44dI54LRh0bR0LXseeCQYgURaIOHJI6RDyQecEheA2G4VTIg7eoQk4SYEwhd5AKdEVEMhWvyvGOYctkTe4+mORnH0pb559V+xngp7j42eVzzywEPHRRsN2V7nsf+dY8++KzuWjLpRw5dpJ2JyVJUvpJRq7KsaPH+OZDD5ErpElCmocsP3M+3HrncF5xzqtXH8o7COCO12FGr8MMu4RjqyCNrinBlMGtHSZ+Wsb6UAxU8LvCCAyhe1s8d0XLxvLaCGNDfS8dJzy0bNm/KpzZcrxmk+PF054kgcU08ACcR0PLWHCK5ipkRshFxCFkTsiKj3sMDnCKKIJBpAAayRVJvWCdEBnlZBfdNlGD2NuvH1WdntEfuO+fbLpJbjg+q2s84NPz9NHTz/wxcvPN/vBvf9f5S8ePX/XXTzqvl7/YrGbC/NwyqfP0Ol1S7zXtJ/LAQw/RTnO8KmmakTqnuffkeQnhauH6BzV+BcnzlVaqEkCXgVNVGTjXtZ24AMPqMN2StVm+ljhu8O4DPEhFRSs9QF/JB8rwUZaQvkCBI1HJER7vWI7uN1w07/jubTkv3gC9vrKUhDCeeyX1kPjiwBESLyRGSL2QeSFXJS88QukNAmAkod8QCh28Cg5IU9g6KvLEvOadrp84a0fzu4A/ve1GLDeTP5N+zjPwAFcbuN27leV3HD7SbezpjqTnr99hT8wtsrLaJU1SkjxHEfY+vpf5xSXEWNIsJc8dmfcSOnjDJM8Pkz3RQedmgMgNyqXS5Ze1uRQPaFhileVWNS/wRddu7e9vik/TImp4CV5fC06YH/4RHwhBwRwGRWRwKq74WE1EHMo3lw17Vyyv2uJ513nKzmk4uQqrWQgfvVxJPCROta8iqQ8G0M+FnhdyLUOCwRchrUAS1YiILd6ORCRXOHMy4sBiogfnc92ylbcCf3rNxbv0mTJWn74B3HSb42ZhdTV7w70H+nRHNomrjcjc/CLdfp80TfFedWV1VZ48eFAzr+R5gsuLg/chw/fqB8heyKaL26caqqKK2x/i6zrsuBWHX6Jytki+Cn9fqbHLomHYrDHDSFFkBcENlImYV3AKrjQCRXxpJAzLxSFuLLiiMIkFnLF85Qg8OuflBy9F3nKO4jowu4L2FPpO6GVK30PfKV2n9CKhn4f8IFWjeWAhFd2G0DgyBg0dRKFu0dgoUyORbGz1zexyIv1e/pq5G88dlxt2r/wtYeDZG8CNoavp7/kXV2w+Pte5/KGTiZpzN5lOP2N+eSUAOGmKinDw0CFd7fcQY3DB3av3ZabvKowcHdbwoawrkjsd1OThBqgaEDOou3WApxsUY1BbOXgRVYOIMYUDKJLKUJ6pigimuNVewyGXnL9cIQ+9JMlV1BtkYBRluDAlR5ABr3AQiDzUrGHZwX++1/OtE8L//Sq4cEZZmINurnQTaKdKJ4NODl2ndAVNvEiqSK5KLoLXkAlERrDGUIsgtshoXXQ0gommsHPaysETaVY3fkuGfynwpd27MOzGPa8GcPGuXcLu3Xjily6s6sTJvsk2j6wzSysrdLo9chcON+mnnJg7GbLczJVwLt57rd569ZXO3KD3XjJxkDXQK1oFYlRQYoNEQ3ROTGkMJV5vgoGIlKhewPOluLPlv+sBF4ha5F7IvRQEYEhVyDzqBSmNw2sZHkIfcNBWLq6cU0i9QQWNYpGvH3Uc/JTy49eIXHc+jJ302utBLxFW+iE89DJI4hAacny4viKBmmYkEF4D7ihxbKnXkZGa6MQoep6J6C72fUty4nrjVcCXdl10tcDtz28ImLnoZPCcmV50ctWx4iM/Y2LT7fe1n6aSZTkeYW5uVvr9RAUpDr9o2xa33p/Smi29QADpdVA5D256cfhRAceKKDFKLKGTFhklElVrIBYktkJshUg8RnMil1JDiRXqBqmZsvuD+MD+1dRBL4euQ/oeMoOmkSGVWDJvNHOQeSXzZVInuKLaEFR8kWR4pcIdEDo5jESG2dzzoVuUfXPCe95gZHzJU5uF0SZ0U6GTQjtV6aWiXQeJC89JDDTrMN4UJkcN9bpVpypZYogiK5OjqmOTlkMHkIbJicaineG2btDTVgYmXrYdW81JJSJ1kLW79PoJeR5c/MLiQkGUHPbrK7V9uHhrSrzKnwFmryoSvIBFiUUlLnvoEm5+bJSaUVox1C0SW0PDOFraYwQYj2Hd5CjrZjYzOTPN+Mx6xteNUB+pS61hMabgDKap9PsZ/U7G0nyH+dk2Jw7PyaFjixxfXGUpR3oGkrhG4gyJgxQlU8EHxJAwhVBWExQU8GAVnVxwxqCx1z/7upejc4b33hCxab0j2w9Jriz14eiqcrKrMt9HV7PgfbRAGlsRbBpxnLfBc96OmE3nRUgUg4rkoxHT3zRSr0M0NbYtjCB9wj8TfO9pGcDsw8Gq2onfdLLjySSSbi/Fa0aWJeq8p9/r0+l0Kgxdp74gZnivUrRttSRolOid6PDmiyql+w83v7zt4cBj46kbpRkpI7EwVhcmpMs6Ubauj9l67kVsvPAS1u3YzsTGJvWmw8gqpIvQmYf+LKQdyBNwGUQeWsCGCM6rQ21UvT9HVpMmJ04ojz04zze+eZhHnzjBbJYSx5bURvTyUNoJgivySj9sNg/qeVWjihenRkYa6J1PKsd+38tP77K8aKND5xSXh8rCedVMBS+QI5KraOaR1VRZ9TDbVQ4cT/XS47lc8NoJrV08TURdNq5rix01mPHxqYBDiT6Nia5nZgAPXRQAoG7C5HIq5CYiSdOixk9x3tHutMnybG3/3g9cfQXZG7J0in7ugGhhijZqOHw/OPy6Ueo2HPxYDON1YUa67GjChRdt46zXfjdTl72UxlQL3Cys7MMtPIifO4nrLkF3Vel3IUkhc4QaTkX82gaRWJAaOjEay8TEJOd/9wauv/4c9h++kLvunOMrd+7jwHwbG1tJTEQ/9+RFMHAKJYl/WCkI6o16UXwGLlL2tT0f/EPHj3yP4U3nepJHlZUUrUdCnAEOvBcNZWLoIvpcRPGIAz3sNf30Ahelyug7XkdjchZNliCWkQM3/nCdm/+4r88A439aBnDzzTcHA8h9q5OHeJimKV49aZrhvafb7ZQt3CFbpyRrKMWkTlHfazGCcwpWIVpm+Frg6yo18TSsMhZ7JpuGDVGPnS3lspdewrlv+SEmL30RmCXc3INkh/dC56jSX0KSZaG/qtLvQj+FTNEEyIKvFi+Kl8IIi86NAU2UrJMrc7OonRU7KuycHmfnu3dw/fdcyee/sMQtX9jD4eUOcT2mmxNqRST0LwbFKOpUh+WjN7hMcRa8Uf79p70efJnIj14srCQqiwnajEJlUCKAqmiG4LyoOgtJsFKbQf22Rbl4/bdYzr3Yoz3GFxbjzszIM27uPd0vUIC+F9vPIffeJGkiChqYup6k31/Drw+xfkCxLsu8AeAjQ3ItRgc0q5AEGlUjwQvUrTJe82wcgQvqXV5+8QYuefcvMvryayE9SnbiDljZh/ROYNJ51WQJkhW011btZ9BXNBcRD0ZQExedwiJtdy7kJa4EAAiTPmKLRMRB1lkWjn2TjTMN3v2O7Vz92pfwyU8e45av7kMNGBOhXvAFhFwNbKGmL+jmAl01ZEa1Fat89E7PwXnhpy83nOW9LKdo3RRcBBFSRHzABijxUEkh6gnNWqwjtx6Uw3MZSTOiPrukUzvP0dNlAAKo82jiFRVb8PQQ770m/T5JlgyyfF/t4p3SzqXolxRzWyVSJxT1ffkIjajE4hmJVDc0VV4+lvCGd34fW97zb/G1JbKDX4CVPUg2C8lJJJtT11+CpIP4lLjhYaSg4njACXmG9BPIc0E9WO8DsGKLIbQcJUXoQtZVVQeignij4iE/lqDze2Tb9JP8s586l0suvZz//JHHONbpoSYOHU0Q1dDo1wHXUBjCzKKZ9+QeWnXDF/cohxeV914u7JxUVlKl5gUbOks4jyhGvQfvTaAVJ0LUszLSGePQ6jLt1DMzl7Bp5wlOqwfIvUjuIVfoJxk2zOBJu9NW53xBYvAM2TuDZF+r/VwtyrwSvRv+vyRVqFiUyCjNGDk3Tvie//tn2PCD/w/Zyc8hB7+M9I8gyVE0ncOnixi/Sm0sgWkVUsPsCcP+Pcq+A8qTR5Rj88riqtLpQ5aHwsMINGrI2ChsmIDt08gF2wznbVbO2Fb0Y5ZV03YIHUbBYDQ7nsD8Q1x3xaSctf0sPvjvnuSRk11qNsI58AQYzxeonJb09JB2qFWDiqrLVZo15eF55VfvUH70EpGLpuDeWaWdBwZxBoUHMOTO4MTgnRHJYsaSBseTrmY+57IUeObn/8zKwNyL5AH90iRJsNZqr9eTfr8XLpr3TyFx6BDgKfpbwx5PwYoZcuvLEd4C2LHGYNMeO198ARve/jayA/8RWbgPyU6iyUlcuoS1K9Sm+uC8HNhvuftryl335Ox5wjO3DJ2s4FbYolNkAktHtegF+AD8uAL/rVvP1DhcsBVeealw9aUiZ58JdFXz5VA8GCOoE5I9S3ru1lV5/64m7/+PSoZXU/Tyyk6yD2MCg5TXa4CWy6TRqVKzMJ94PnQfvGmHcuG4o7cEHTdEG3Mk/JxeUGdVUitzWY0TWYSIoZdHz4oX+Mz4AGLUF9Owqp7l5RXyPFdl2NgZ3HOqgxfDrvygcyeFQWjRri08QZnAFgOi6hKV6QvPhpMfR488jJFVXG8Oa9vUpvukbc/XvuD57C2eex7KmV1VcgO2JtimoTUi+JBPBdsqKOVlD1FM6LL5cGPVeWQuUb31UeW2B1V+/1PKqy4RbrjGyMt3Kqx6TRdDp8hiSA87Lp/ucsEm4fZDKiZC8Sol32vIKKi0sJWi/RxIa96pxMbgUT7+hHD5lHDVjCfH82THiBcpvIDQd4I3hshFOpdFspRH1MWz2lZ5Ni7gmXkA58JInJhQ76sPBKly1KooAasAjw5/8QoDr2oSiFdVUwxw+4LC51TJnLLi4PGHv8VV6QqSHkFZorY+JU8cX/pLz6f+h+Nb+5x2BKQm1Ces1AHxDpc5jIOmINZCI4KoHqNisEWrNkkz0ixM6PQVMRZqkRGtBb2A1Rw+9XXPF+71XHMZ/Oj3GrnsLGDea7LiqdcN/VSY73owUoJCRReRMhco+aHDQFj87oURqPdChlKLkPsW4HDH8NJpx3TDczyxJI4BmcRr4Ac0fUzXRyzkOT1nTn8ICKydKtmq2iHTKidzbfoQMmCtduIqk/MqRcfNFN8izN8LfeeJokhv+eIh2Xlhh5df7XDa5b47hd3/1XPXQzlpDeyIUBODeAeJoyUwNRGxfdsmtm7bxOaN42w6Y5zJUajXPZHJ0ayHyxydrmdxIeXYiYT9hzo8cXCRAydWWOpm+AhsbIlHDU49tzwAdz7o+f7XGd7zFivrJ1RJlI9+Rnl0TqAmRQ5QPhOpUlp0SArVMCtWgCDlCLolfH0scCIRPnfMcPaYMt1U8SIs5xJ0C1x4YC1v6XpDzUT0cuPZ0fKnOwSY3Ht8gYAPk7uKbQ9m7oZYP4QoOGBHrskttdLBD9EgL7BwnEhHRY84y6/++gIXfCKMWT/wqNeOQDwmWAwWJ1HfsXHMcMlLLuDKV1/M+RdMs3F9Qsy80p+F/jHorwpJJ+ACeR5OqiZwhoGzG/DaUTrdaZ44dgb3PJrxlftOsufoPH0DJrKYJvQVfv8Wz+fvEy4/Dzk6q3rffsTHhsRJ0codeAD0FEhGCZUFEsQnSpzESLghEppOaot286OrMJEY2dgSalZou5AHiBraDvpqSVRY6Trl0Gn2ACY03jFBaaMyLlmZiqgYgQwbJMV/dM0o9VqwMlx/X35HX2Dr3pALdCPR2/eE8NJoBKaMUcSkjq0TEd/9ltfwquuvYMdWB/39sHAH+YETpN0VyPpF1oWKA3JBi1sUtGAA7YIuyEgEl44Kl75mgre/eoo7HtnI/7j1JA8+OUdWgxRLPCo8saw8cgdqIqFWM1oSOtwa0lrR3ZanzmlrZYCBko8Q0NDgBQvCaWSExUxYXRXGakgtChz01CO9HFIiui4jEWsYzeS0GgCmyHBFnmLZa/n4OiyCC0OoMDGGQgqVQFKd21NEnaigRk3o26uoYqNgNakrGkG54/qrr+CdP/YWtp7RgZP3kj32BNpZRHwffKDjqC+GMARMJKEZVFzRPA35jOaBQZKlAnOKzi4xXlvijdvr8tof38gnv342H/3CUeaThEQCWlNrheQx0SHz11eSviIKfFuVBiqhVAg5T4kXFNMM4f1esKFoYSFFYi/SQqhHQqqQKaQYnDy7EY9nFgIQlZKdp5VUZqizsaYGGHD2JBzgwCDCRIyUbN6C5z0YzypSx4obNQW6omrwSCTYNJMf/sfX8QP/12vh+J1kDzyC9JaVvAtZilhPNGKESYEaYEVcgoZ2QKDsRwI1lBoS4k5bhUUl7aN4Q5aCP5xos3aQH76iJTtn1vGBP5nlZOo1UxOSsgrLV2V4z0tK15pAN6TrSKUHSvE4iqFFqbCXwiC6D5wFMZjQOMohzVHJkcSLNKyQVUYD5LR5AMUUBqBVJYxyJJuBFRfsXNHK5IUWD0UGEzWnhAIdzN+XqVIh0DCgCRLkV/I8ZccZ63j7m2fw3/pvuKUTSt4Vn+fUmsC0ARtxeEl47BGVPfs9h08o8wsqnS6kefh3IwutJkxPCmdvFrl4h3DhGcpkLMKyajan4Ax5Dnqgq6+Y6cm7r7D85pdVbA11XtZoSAgVqplU+C6V9lyFlSxVnnOJGMkgXoa3itQAr6hRxKuoRwSPJB5yDJkqnkhZF+tprwKc9+H01kxi6Sm4cTXuV7j6opV5+SEmcKqbfIogQym8UHyuyw0jzYTG4hdI55bBpVJrCkyLnFgRvnIr3P4Nz+NPeuZXA7PHWhET8P2C+h0eeO4ILVnvaUSwZQpetlO4/kqRK3cAq6rZPORqoK161oQTFSkoaUM2UGUCTEDVF2WPL35sf0r2W07WD0aKhyOqYsJ8SbgQBe5iCuC84D6HZDmwjFWNxRnr6dRPrwGIasnXfsrE25CEr4PHMiB5StnwGVK8TAkGDWBhKmFj4AwGTCFT3glFotjoowd6es83E156GUJuOLQg/Plup1/4usqRBUUiIa5b4hGP9YrPA+Lns2KAo6zEDNTqYCyKGDm0DHu/7PmLO+BlFwjvutrIa3YKcdspUcSdX3PqVDEF7dwWBy1BGKu85WJN4Bb6osfPYEIphDZDQAIZ4gXF9FioIAbahuUIYylJM+gtSIHFKA5D7hEWktObBHotZh+NOTXtl2ECOJi3l2osNBWRBFsdk5YhKihrBvyGd8NUs43gcmUxN/pLH1ZefUlIoL7+MDq7okQN0eaEJUscec9JPYKZdWMyvX6UmXU1JsYsDZuLes9SJ2FpKePEQs6RhUTavQwxMDIa6u3bHlG58xHl2pcIV5yH7D3g9c/uV+JagK3sQBdGB8zkQYorgTHkhQGf3xdzBaVHkHJMbQ2uImuu1ZrJhwJh9oF/Su4Vp0quYcT8OzAcql4QOHXQcvAb6MDOKXh+obETJmpMZbrGVEieBbt3TWgo2cCDLlFB3/ZF6SxGWMjgk3eGR1qrQ2vMoJkXOo5zt81w1ct3csXFE5w502V9bYm6XwHfhbwfcIBcITOs9GocXh3lW096vvRAlwcO9MSpp9USMgefukf1L+4CsZ5GoyyFC7EI8QMBiEHdFzL5IaNYSrq5kCuloyiFyIryf9AxrCTDT0nCK2MTYY6pnJN1z1Lr4xniAEaqsgoMZzlYAwsUrY8htbuct9dy1l5NJR+Ii9n72GihxqFYEGtKDxDcXeYV55XcK2WPvNUyqgWTSDMnO6bW8wPf/1pe+7IWE/YQLH0DFk7iupmmCWgO3iHiCq9TdI0viuGi8y3v2FnjvuNNfv9Lfb7+pENiodEy1YwNU3ATC+IK0YCFPKScZ15UEcl94BDmKmReC/aQfNuJxaKJNEwcpRoQBR/Gk2QQXIsv9greGMPo1GkOAUaML9u8a6YPqsoMg7m8AVXbEkQUItAB7UsC2zcWpWZU4oLsGRukZoUIp0adGOfV+3CDMotkVsjU0ndK6gKeoxqUO2ZGR/m1D7yBczYfxO97WJPlZTRXMYpGVqjVBRpF7FEgBfpKngj9VUUXHVHc48oJ4ZK3G37uz+ArhxSxIl4FI0Mxh5oJMwCxVWLxRKrUS4YwSCbgsCReSHMNU0AiWA/poC4MWrKKqinDgTxFuU8qRRBamaQqKZY+CBwr65qnuQpw3q3R1av8eAMMIHA6gqYOUt52iQS1osR4iSQIL8QmjF03racVQTOGERJGHIxGyMhYg9b4hEhUJ0kz2u0ex+Y7zK9k9ATSmtBxhlyVtOe57LKYc5p/TffrBzUSqNdFmLRgRFb7ytyy0u4JeREvW7GyrilMrxMaXqFryZeV5XllYkr5ngsMX9zvtRkHA6uJSt1CIxIa4mg6zzqBmXHL+slRxsebWGsl6SWsLrfl6HyfRQftGLpY4lToIYg3VABPQUVdtTZkKFBJZSJNKrOTRfgYeAkj35EcINThWglWUlG9qA5iBqqXSqB2DVw8NUEbRqVuPS2rjEWe8bowFWVss45t29ez9SWvYMNFOxmdqlOL2hjtot1Fkk6HpSV4Ym+P+75+kPsfOiRWnaaRoVcXDh9cZHbfIjNbrOCF/SeVu+6AB57wHDimLKwqWR7QX6dQi4XxJmycVF60A15xvnDpZs/EppBl3b7fa2SVWEKOMhIJTXGsV7hwc4tLX3IB515xNht3tBiZNEQ1RYzHZ32S1ZTZwyn77z3O/V/bxyNHV5irw0oeoakX1Kj6wAfwRTLsKVlSIRZU0dayEpBqfiioMSKm0M0+/uSSOV0GIITBRGcG05pSOXgtE99Ahg6Zu5STOZFAzaiU7N6RSBmPlMm6csZIxNn1DhecOclZ19/A+pe+EmoOFvfjlw6h88fQ1ZPQXWLEp4xYzxkX1nnlJet5eP8ZfOqvDsh9e45ianBwSfjnfwwvvwz2HvPc+4iy2FG8FcQWvQwR1AZf1VFhsa3yxJLytX3wh7c5XnQWXHkePHZIuXUvjNaF2CqtWJjIHZdvGeG7vvcqLrv2XFrTOeQr0D+KT9pot4fXPkJK0ypnnhdz5sUTXPWPruL+z53k0596mMeWEzS2+BQcaCRGSo3Tsnc4GGseosMM5Q+GEaHkX2LBWnNaCSElUm/XpidoFeUKAx2CqGrQzinlUYPLr0s4/A11r5tbcPZkXS6Z7HLh617H5Nt+HmoR+ZEH0WMHoTML7VmkOw+dVaXXJc+6QtZXn+Ri7JNcOt1k54+cy6dun+Ljn32EzOY8ekL4+qccuQj1OkjTFDP6UplFkUGDUgRspEgcUrI7D6BffVylEcNIA2pWaBgvW1G+902X84Z3v4LWVIJb2Et6YBnxOSIpoimqCfg+6hJVn+J8Jqgjbta46nvP4OxLL+G///6TfPmxOXU1cCk4H3CBgqWupabR2rFmWdNBrQxUDS6f8/70C0T4osEnQwnlobDiKcqZBmQ43KHUjKdplZm617MnLC/a1JQXbVO2vvVnib7r/WQnvgmHHkQ6R5B0HronoTOPrs5DZwWyBMkSxXlMLkgmmh3siY2+xTtetoGpiZ387if34qJE8zFDzxVLHJzgi/niNfV2UU+JhmagUcXiiWKVRl2oi6cRCy31cvFknR/+v97ARddswC/sIX1iFSMOo31wfdQnaJ4qJKKaQu7A+8IjCtpLyeafYONkzE/+7HZqv6fy2W/Mq4+FLPXkasQGIlHh6XUY9KuogOoaCHboCBTvnG5qn2Yk0Jqo2uAZ5qclnbsAdCo1/6BMqhtlIvZsHYUXb2rwiotqzNzws7grfp7sxG3Iwl5ITkL/BNo5CatzKt1FiX0bTEfIUnwP8rSga6siXlRzIX30pFy7rUu0axu/9t8PIJqD2qDUoWWHTio01EG3TaXS1gCjgpcITz0SWs7La86e4kd+6XuYOWOFbN89iHdYMvApPktVSaVWy2HEC1EG1gXAoqdCN4yHu1QwIpquZDRH9smP/pONLP72mHzpsVVtmDgAOYAjsIpFC7rI8FHrGlqdDBXMGVxIgS3HTrMHKNu2MuxjSTmfL4IMEPDhCHfwAJ6mVZ2pe86dgBfvSGXmre8gv+LnYfleZOVh6B+B9Djan8NkC2onunirzM8aVjt1jLOsH3OMRg6WPclqKCfJFcFouq/NazYdkve+cSO/+aljxJGSMVDiKnSAgjEUaIoO5F1VEVGNJBjqSC3E++tevJ1/8gtX04oPku45hsWB9vF5DpprPKHQsCyvxBzd6zh5zLG6ohJFnql1wuYZ2LzeU2uqsqBkiZD1RRv9E/Kju0bZ89tWeiuOmgg5iilkqWTQGyrRorVJ9mC0XktNQohiy9Gj7vQagCnm7IfAtq6NUIV2Xwn5iqhaCW3XlvWsqynnj2Wy+RUzuJf/a6H/hLJ4B3SPQnIcTU8St9qkSU/u+uI8f31fm0ePpiz1FWOFZhMuPEN42xVWzp/xms/qAAgQMaTHEn3LWQvyxMsm+aM7Fqg3RZ3TQgCowOxlQFUcoJeGIPdWM56RGqzLHe/8rgt5x/tegV15gPToPEZzcH1cklKrO1hXk8f2W750e48HHu5zcinXfhYaNApStzBah7O3GF57hchrX2xo1R3ZnJLMCps3tHn36yL+9SeVOFZMXoBnYcBvkFRTURhljQKailRG7NU73TJ+mruB4AoqSDE9U9HBq8izDeDbEAo8Vjw145mwypZ1ir3yx8hNqjL/59A9hPZPoski8VifE9+Y49MffoI7DqSc9NAFMhXSTNV3kQeOeT7/kPAjrzHyAxdDPhuU4aXYCZSf6Ol7r0QOLIzypUfbUquLOhe6SEUbUxEJzSUNun9WlJr1jNZgXeZ491tewtt+/FLcsbvIF5bUuARcistSauuQpb7lo/+lxy1fS1jOIG6gEhuSKGB0sRFdypVFB0f2e/naHvjUbYZ3XW94zU7FnVSyI4bXneX5y23w5YMeaw2mqO2HfeFq0q9VYxgyDwpPYI0IK6eZEVSSQUTKOCRrWUDVH0p0EHkNqjWjjJDR2jANZ5wLJ34XVo5AbwmSVeJWnxN3n+RPf/tx7uvAXCyspoEGnWi5lEnUtlQWvOfXb/GcWDK8/5Ui+ZxXDYgK3hlqyz3+5RvGODhfZ898InEUoV4ZwicBQDcFPF0rZNvXZ05+7J1X8aYfPJNs/1dhcVWN66J5indeauvh/r0R/+GjCY+ecJgWeCshiex7JgzYKGa+nYmviaYaGgZRU7l31utDfwRve4WR975ekAWIusqbLxDueFLVF/FUBqMSshZsPXU7ybCpHMSklNM/F2AqZLDBiPdwAkAK4kIge8hQvNkE+r3GHjHbzwd/B8w9Dr0U7fWI4pzOoQ5/9Z8f12/1Yd4JK6lI1wuJN2EoopBxwQf2bKPl+cO7lFoNfvrFSDIbWroGT5qKzmSrcvNbxnjvxxwLmSMyorn6op8eMm1LwCVakcqMc/zkD76a69+xkeyxO2Cloybv4LNMxHtq6w2f+rLwO3/eZwmgaUgCS15j53j5hdvlx977asYaC3z6zx/jo3/1pIgNiiGpB2tUtOH5yF8rJ5bgxjdC1IOXb4GtY8i+jg9cSwaedQ3JeriTqCqZVyaAYSnGszGAZ4QcBWszDDTWBn1BGQamtSqOAwTBe4fzaLy9Dot3wfI+6D4J6TFwJ7j74wd4YBHmnchKhnS90PcmSLWoaKqGLLxNqoautypN4fe+qvzpw1CfKZrIJnD+0g566bouv/imBjaHmngpeQjl4oa6gRGrMu0cP/mDr+L6t0yQPfRVZGFZpbuC76ZiMiVqGf7gU/Cbu3OWIiG1lk4umqioR9nQrPFzv3I9F11xnG2j3+C9P7TC9S+2uNSHCXHQXA1dZ1Vbov/zIeVDXxCIhXWiXDCl5K5QQYGBgZ7KnB4UXpXtZWG0RIkj+Q5MBp3ylp5SqepAnG/thJBXNMs8brxGPLGCn9sbbn/Y7snSozlffyDlOMhqSuH2DamaoM1DQbeudJ9VA8u3Vkd+4zbP5im4epNIsqhqo7BMMl10vPniPgcWWvzeFzo0WkjijAoqNQOtyDOeOf7pj72G6641pA98FZPnSNIX1/PULGSjhn/7CeXP7vUwYkicaK4VYobzbJoZY93IYfLHv0W2sEwzSjl/kwn0bhOCTpZlKkbIvCFuGf3YAypnTsL3XwbnT1bvuxa1lQzwAFkT9AeLK1TUg3oMBqsozyIJfGbYsXNDvd3B4MPAVqUQ5FpjMUGASclyRRt1InscXV5Beim+nUDS54kHMvatQNdBrzj8TENsdVTIlyUThpD8F95A+yL86l8pezKhPoG4klFmhXwh56del/Pdl7XIu45W5KUmSkTOaO55/3tewXVXdske/Dqm3UVWOrgVT80JbYRf+e+eT96nMGLo5YJTgzWGyAYOgFGCAlp7EdNbwKQZdA39jhIZZMQ64jRny8SkrI/rIllYNkks/N7dsLoqnDk+ELSuQjyVZtsgNxiQASoaioElqLmyvn56DcBac4rwYvmDVDnfIsW4l4TkPBxc30FXFZP1YBX8KtAGOsqJk7CUoz0npCrkanBqSnS8AuJU9fuCPEuuBm8tx7vCL/2ZZ75lqI8FvF9iUCNqlhM+cIPhyh1NbOpoRZ6Ws7xv1+Vcf9m8po/cp9JOkXaOWxVqIiwi/NLHlf/1qOKbhl4eZtfFZ+TtlLyTEZMRFeA4/RVM26l2BXpKXYSGFcYkll/8idfKx/5/F/J7v7SZl53bEjIVG4ke7op+ek8QhPYVdqQOuJRCteOyZqaiqBGMSNBTEs+zoYQ9IwPwXk3JfjFmWP1XhfZ1zaBDGHbINdzqbpbh2n1og7QVOkBH6CXQUyQvpl+H9CkpxRa0Gle08q+WIsy2bnjohPCBv1TSaTD1goZkIVPRdbT51z9SZ9t4De0p7/++Hbz1vENkDz+O6QJdh+uEDuGxTHj/JzxfOahK02gvF1UxiMu5YOO0/MJPvkZ+7p9cKudPjUvNE4RGsh70gS5KX9QiZD3ldVft4IY3LzJ94k4uru/nF16X0bSBwpWL8JdPoCtZsb10zd6RQcBfc/CGtUhrZIRIwKg3p78K0KCNr06/fXpQVFi+EvtzhNwJmTHMr+b0VqGRCXlSEDIUbTaklG8v5uqGOcVakYXC44hIQB0LhZGwHERMrHzpYfitzwv/4s2CO6pIsWA67aDbp5flX/zQOPu+2eLtU4fIHk+RyIgY1Dm01hI5lAu/8EnPQ3NBWy5xZdLr2DI2Kr/5G2/k7O0PwuwRXrk94pf/PaLe4/sp9EGS8FRdIUe4aX0H9u4nOy4qmcj6TsZoA5Z6QQPwybbnrlnFi1F/ChuySgEt4TZT2UQWSmwfehjy7MpA88w+2TlTCDmHSZvSRgej/4NcsKLCKU6RDCMnlpSFE2F6UnsgPZS2cuYGy2hc5ROcSoesTBgVgG54EF6DlFzA7686s0mjCR//ivLxe4TadhnQsa0RsnnVl21p67uuM5x80tFZFbKukq6q1GKRvX3hZz7ueGgBpR5p31mcGsEYcamXc86c4Ox1d5M8cD/pYwtc2Fpg63pIUo/0MugRNIgS8A68oEm7D6sG6Skm00G1VjbVljPD5w5adcYU02usoV2X20gr+okaWu6hNWspNRM9pz0HiKzRoF+jwyXBa2gra6X9PUUSWOjiz3WRvXtdaIR3QVJwy8q5U4bztzQgDZu0KiKRWgGTwsEXwFJQEQs1vE0d77rmLP7ruyzffxZkEfy/f+G586ChtikoeFGErWzBkWdLNC+fYKEdsbqqNBvCQ234mU969iyL+tjScxLUOIqua0APEpg7im0DHYNfCcyezDu0l0IPtB/mtXyumiu4LIOuR1OgFJSqyA33veFwJ8JjAiFEZM10RWXnEOVamsFeI1PyLTwx7m+Y0ng+DcAUbN7BDzQELWTot2SwrZVArw6ESENXDfc9GtZnShLcpe8LcTflrS8bYSKy1CXX2KjGBUQboUSApRCMLNrLMWE+0PQzrrtiOz/3hpRsYZVfepVw3VaYT5UP/qFj34pIfTqsey9yVFjxOhatMH5RC4vhgWXhn/1P5XA3BNXEyaDyUBmIDIPPlWWvuhKSV9MvYrnLoZsoCeGgXUBDcsCnGXSLnnOx4rBgFEuxZVIQKuK+cuqWq8EFGHAsK0Qbi1ITiK03HGib01sFiI8jwzAWSTnqVWYrsnYtT+G4nYr2c9RHRu9+DE6egFhB+8ELZMuqL55s84PXbKTlRcZMLi2rUheVoBQaSreCQBqWLdaUepJx7WVb+dUfbNFYOaQ+Nkpd+bXXwCs2CfsWlV/5L8qSNUQjiPMiUpD1s4Vcp8dWaW9r8s9v8cz3FBMbci31yY2sBTqE3GXiO7nQAekD/RDrc+/xXSekhFN3lNrRuKBLOABqxRZqZeiAQl5sQ5Dhapth6TcUzmQgoFlC2BGKxRGJI47k9COBkaiPShdUTAqXK/GqU74VAGggwZ6p4IxwaEn4/P3hm7huiJeaCsnxhHecucpPvH4bkyaimWeMmpyRgjvYjFRHY5XxyMuoZLI+y+WG154v/+p9m1nHk6RisS0lb6Gjk+hvXCecv0n45pOeX/sjRWcMpjlUqBOEfN7rGWMp3//aESIVInXUrAzWwxkZNmK9CC5Lg3pTApIHCblQhWig+qaBdo4GIAoQ7/zwehuFiMFiyrW3JeRUZT9gzQWTatIXnn8kSGyUyAg1gXoksOU0VwGNWpTHRrG+5PoHQqIIYkSCm5TB3pWSIFyMQgmJE+LI6CfudvKGHcKU89JLC0EFFU2PrMrbN3rO/L4z+dN7V3j40AIrvYxcwRZE2vGa4bwdG3nL9efyXa9SWHycTJuYUUSSLKRRYyo9FZJEiUeNfu5+lU274eduELIniiUAZeNyKdMfvkgZidfJ79zWJk9SGnFEqqZUQxEpWkgud6F0TYpcJypWwrhiTttXLkJ55nmR2UVAXbCiUo9YoxxU6fioVGL/mg2mBZ3eVNbOxia8XRNPLLnSjk+vTqDF+UggtmC0SMjKwcWCxlB0gQbE1qG0evhVrFE5sOT5T3+t/OorDPmqkklQ70aF/rEOLxrdx8WvnuGx9Ez2rBiOLOcIyvrJJjvPHeXSS0do1ufIFhcQ08K0cnAGF/UlGu2xIjE3fzjjWFcwNYMdVf74c56pMeE91xnSvV6MDHdEZYs57zhrlXPXT/L/fiXhgcNtVB1EBjVBDCMt57kSkLwwdl8ctgff94WsiYIVjAlDIu0+0CgAkWnFUSNNs6dsdSgnhKGyiBopQoCUa+jDLIWRwgAUNdCMoG7VP5sq4BmRQmtkpmE8kQ86NtXFyUWjjqeMtJUbsgonlqqhXrP65w/ncsl6eNtW4dB8MRqmYcJyvuNp9U7worETvOiMBlzShBFgZBlqgm8LWXcEUx8NrUEDmteJ1rdwcZN//+uHeORoQly39PIgOlcbgd/9C8/kqPDWlxnSJzzGhngtRkiXMr08npX/+KYJbjkwxWceTnhsLmWum2nR/hZ1oRBQV5Q/kRJFYd+fz8PfSx8dRcpIDW7fD29YsrzkRUo6toX/8Wcw1zkEtQjvzUB43sgpaN+areRhlWwkIpGBmoHIiNYNgg2tbGv09A+HxgZbF4/FaRkrIymGFStE2+Gu3vALeB0UNQKGRFVqccRvfC1n/DVw7Xo4tBQSpKjI1BMjSKLU5vpIv6+MIoyijLdgdFRMwyAjMVprqFcr8bpxMjfG733wHr70QBdtRZqkoQIptXq1Ab/2MS82Mrz5JUayPV6LbdChRExV69ky37fZ8OYzWuztjsn+rpEv7GnzmYe7rPaCscRx2G7GhGUxCwOaUc2Kcw6NUOpepBaqpIUM/Wd/6rjsLiOd7iKPH+6S1iypL4UlAqhb3SgqxVCNKZnWRrBisEaIB14AaUaC80rT5DTi78BsYDP2EounbpC4GO0yUgA0Q3y2ohRVaWSqDjp6igkeVK38ylccv/wK4Y2blNllJPVhT44Ua0KkZjC2uFkxYHM0zqABvtkUndhCvP2lJMccf/wLf8Rn73qSvGnppQF/cGFIM0gCqUFr6L/6iJdO1/D9VxnhQFj3Zm1ghzoPWddjaXNB1OaCaeG6LZaTS8Jdh5Q/2Wd51+UOxsb42MMtHj85Sz0WDudw6Vah6TycN8bJbwipW8HULIsOvvSQx9o2xJbUW7KgdbJ2+IPKrqRhmR3o9UaLPcZCZKFmYbQmJLnSIKcWi7Lt9BsAIzHELrBm4xDn1IgWyoHF+HOZ11aWd4ZUKrzltZA0MWhXkRvv8DyyU3nPJcIZFpIkjDwXSpvFuiwgQsTmSt1h1jWw28+G9a9n/isH+bN/89t8cc8i3Yal2y8aSqGNrOVYdeYLJl0s/MbHHfuPGH7qjZbxKY8/6iXvl9ulglfrC+oSlZEpx8SIAQP/z5cdux9B4rrjkUMLmEhYyeFXP5fzi2+1bN5Rk7u/Ospn757HNooOIoLUjeYq4pxomE0t83rRCqtSigpApbLypqz943D4GhmRRiSMRCDG0zQea5ycdpWwZuwYixwxXhs2DHOG/XnFIIOs3dR5ysq2QdlLod+cecGL1Vok8pFH4GvHlXdeCtecY9jUQogUahrGd8cVJoDpSJgcJ482cOS+iIc//SHu/upDPNRB541lJRXpqwky64Wcig78kwYvAEpT+MhXnNy3V/mhNxhet9MwYlRoeyUrSra6gfVNvrrHcvfBDlHNkCI8cAJEU+KawWuEMZ5H5+GnPuyZbHi6vWNksZAQkWlx2FoMgFBuNix1BAaaqRhRNWuzf7EiGhnRSERii9aMSN2irTCqJmo8YzVPPf4ObA4dbcCIdTStpyYBtq0J5KLFzfcVHzCURlIZysOXhLJwu00hpW60VoMnVrz8xpc9H73fc9k2uHS7YfsWYTQTTF9w84b5b0QcPbzC4b13cfTIbSzksGwNq6nQzoVEjYZ2Mms4BKUNGpSsINLUW/DgnOdf/rHngq3CKy80XLgtkvVjcdAfWIC7v2K55etdOk7IjdHMi0gUrmcyyHoNcSTax3Ai82LqQu7DjQ+rYWWgklTZj1KdT6gwgoM/KKeqrCBxUXlZA7FFG1ZoGmE0UtUYxmJPvWX0wMppqgJK5m+97vy6mqMpebHFA/omrHVxhTSSSFUzVCutW1UVlcoY4UBJSoFUA8nCRsLRnufww8rnHvQ0LdSsUjMhxXQuCeu2Y/CRIVOj/UxJvCHzIlnBIlpLIhl21VyhOIAq3llia5DY8+AJz0OHHTXjiKJMLUiSQ98rpm7IxJL6Im6X42UD7aKgn5SJYjGqbtAOVze47bKG3alrF8mXswCIFFCxiFoTbK10/3UjNK0wYmGkBuMtg/acrmsojfFG+tAt33Zr6HM3AF+oWtRi+huaSn3J6XisOm9UusXUD1Yl07B/U8uG8IDeAAVBJAw0FqFW1yAhYX1bXw1GDLbm8aL0gKQsiSRo/yCBN5AXiV4R78k1rGd3iriiD1EVrNNyuXOo/oJQsyq5E6LISlzTYilUqGCIwyEnjvC9B+2oIS2h0rARr6JOtLL6Yo2yRwXgPQWOlVIxhZJAW6J9ROUmNAu1SKQRiTYjYbRumGhZssWc6RGQGt1rb789L3IvfZ5DwI0CN2u9LstTI9DQlFGrMhpD1yreFhtCRDWXtWvhtBCNLEfEJSoUQVWl3MOnQxis2JELTk1BddYKD14H3qi43UF+vdjZ48o2dGUj93DjZ3X4a+gRyj2AzqOpH9beoKG2l5BIupKNMJgxLQe1S+zeFDS+ITmz0tuX4Y2Qp7B7yqy/TPjCwTOo+eMi669btBUJIzXLWMMy2TKkNmd6vcU0mvNBneJGI3Kzf34N4LbbDOCjuj26bhSammjTZIzXDMtW0QiaKHHNSaSOOrm2YsRokHNJXNC+X02hmwR3aYwSWAwBcnVecWGtY4DOCzIoVZZMhZA2PPzh2lc/kE8ZfN4gAay0qCsTDQMPoa6yhj4g8qgv/k0/IL+Vrr/Cf1AZKveoDHXiZVATl7Z9Srk3/AmGuH/R5bNCLFL0+YXYijYiYTQyjMaW0bowNRoxGis97euGjeOYyBwO3/1hOW1JoIv9k1NTlnHTp0afDa0YTRxRI8X4DO8cxjti8dI0SjPyjEee6aYwUQeJYNkLe5aFR07A/LLTXDNxsSFTQ5oz0NPJwyo1Sl26AWgSNEWD9P+g6RSeuR9k+1Rak4M5q5CCVGxJBv0wXcu+C4hkEOsb6jNQTmwO+3iVzn0xcVRhxsiw41Dt7w8nqweAz+DwtWz1amSCB4itaN0aWpHQig0jTSMTTaubJmNicllXd4xsaNHBPBIu68nn3wBuuy2sIk0cj45OxszEmeS+w8aJSUxfWe4Jq1lEkhvUGyJVteKIM5VR61jOPNN1zxlNuGRSuW4bpK+q80ivJvc+bnn00TZLvYykCR1n6eVhIihlsM93kCeXCpyBEF0erohWVOoq099r2m2+SmHXQZJSyLSuET8sdNwGuYNWXHpBXzuFhy9SPe1Tu32Df6ra6DHIoLdvAxqpkSA1g8QWja1II0JaNUOrbhlpGNY3LRvGYzljQ1P90jwbRjCsHyXTxtcBmD0Nm0OvKdoeJ1fd/WeO1frbJqjt77d1YsM6iW0cFL9MLlaCjJtXj8GGtXIe2g5MUVunS+hSouzo9HnV5lRe9ZZRjr7pDL71DcP9Xz/O3vkuS3Vo54Z2Zug7WUM2dZUyqmzWlRtBhr2Hp7JiBmpmItUt9YN9DlpZH6eDJfGip6hiD5zKqRKw1RHZihnoUAyTNaP1g8MvWD1x2IxKbEULoSxpRkabkchIHJK+6ZGYmYkaGycjNkw3ZW62rVu2EuXjk3PdR1e+CcCu3c9IMdA+nU+6+faQy2189cLSB3bNvCNeXN184GTmpmbWm9QJvSQfJHXlNpZSMq2EiUvv6IsFSD0HaVelsZywfmSZc6+wcsmrdjDdGCc93iVNM0ys1biLV+SU9umAQaNrN85IZVShyNikUoINNnkUG1BEdE1BUjB1TtnAORT3qmT0InDKWhiK7p1IldJVPBMRrIS9B9YIkQixEYmNaM2K1K1ILRKakehobBirW5kciZlpRcyM13TDZF22bmwytS4iPbTPb3vpmE03nX3b+h/46n9RvdGI3H6adgffdrWF2/OsHt2+/byRF40+uqxp0mHzxAjL7bB5O3dhmZL3w/LLIaTeYLKwItp5Tx509MR71Ikw9ZjKyNE5ndw+x+veMMMlLz2TL35mia/cOwvisDVop4G7kuraTQO+wkM8tceqpbwmWq0GdCjCw2Cf31pXrsHTlwkdfFsJbmUY8wfzEUNhDx109aquX6SinVDuQy4EtGyQgW9GQjMWGasZHWtFTLUiNozFTE3UZHp9g61nTZHOn2RyNFd2nonX8c9Uk/XTwwiaDZa10jX/w2wa13OmsZ3FRaZHjUw2DCNR2MkTW8QOvnGomx1C4oVebminhrm+4XgiHGrDvnnl8ZPo4RNG5x402vvSLBsWHuVd35vx3h+a4bIzGjQzz0jkaUVK4AoOufFS4gOsWchQrq8assulOql4yp6TqkMv9lt6TpVrPWU6n1P2nVRGudcwmRmKOJgKly8KC7GlJHbUrJF6ZGjGwkjNMNGMWDcay0zLMj0SsX48ZsNMi61njDA6sx7mDuu686LIjexIs31znw0GcPvpWxkjN+BUVW4Q+eof/cl5D5+3s3bRkXvazvqeOWNdXfppps4Fwbt+sYatfIg5YSOWei1Ywkru0Z6FlUxZSpXFRJmsw0TbMD6vjDXnuWSz4ay3NfnUPTU+eXdK0g1Sbb2AyIT1qkNZPfXl6pXK4KpKVcX9VHXLqtrFYCS3KtZbMY2nSJpX52EGsnllFmEow6CKKWdUZCicZQWNRUKNbwKlqxkbRuvCWM2wrmmYGYlYNxoxPVFjZsMomzY02Hj2NlynTdOddPUrLqz1Gf/85I9/aq+qmrAf9TT2ArjtGrsb8v+krQ9PvWTjv9v+6CFdODHP1u1bWFw2ot4UK+PDfIR35YbgEpYNOHzuwvbtvhHambISeRb6ylhNZaSttKwy3hBG51TXtTrylq2WC8YsH7lfueuIk1gNYg19L4FLNpibk2IcXapa/VqJ/WsObmAPKqdqsMEprgKGsi1yikFIdX4/jHVKOcBpCOzmcPgyUEiNrFCzUDNCPYKR2DBaEyYbhnUNw/SIZWosYnoyZmamxaYtLaY2b8Bu2kFy63+jeV5s2HwZHOz+NgC7b3hWzaBn9EWlgvFt79kxcdU7Zx7Ov/zNjXfek/ut528zy11h79Eu833PUuJYTZV+Hla/lUOj5cbwUifYlEzfguNfj6BuPDUplEMjGImgBrJhBOoN4c4T8D+fEA51LCpCiiHzUqKAWhkgHWT7Otw+IlpZZzgUW1qLDOlAr16ekuuveXDy7ef2ivBUah4TyfD2B3cfWumxDTd/JBYdrxuZqAvrm4aNIxEz4xHT6+ts2DDCzIYGE5s2EF94LfmTd+G++THXvP4VcV5/6df+/JLfefUuVX02t/9v8wDfdv98uAG77LV/vHtp4S1n/vq6157zH85/8hF35MQc287azPKKwakjd8WW9mLWL1UVr1JMdA+5Y6a4tmHzlyd2aE0MkXisQWLxNCNoGGV/V6mLsnkE3nMBfOmI484T4Y7VTPAsrpBbdoXgkpehxq4psINhXqhV9cVqAl8WdMPioGA3qGp1bFeFUz1AyZIObV1LuPHWoFExx1cefM2GLWAjsTBaE5loGKabhg0tw6ZJy8Z1EZs31JjeHNPYshE57/V4Y9AnP0983nqYfgn5vvmbbgCnu2+wPMuXPBMDGHqBG+VzL7q5+eoPveH+1r57zn3wMwvOrpsyrYkxHty3wrE2Ot9XWUw8nUzo5SHmuyIHKAWn/UAeWysJUjHvFlTFB+zXyPjQT0AZsyFfWOgLd85a9rYteTEp6IqmUrUTGJYtKsON3sN1NN8OsDk17y+bmaeqeFcNxlSGN21FEDvsQKYs9Qa/Tz0Kyd543TBRF6Zahs0jli0Thm3TomdsbDCxaUyirVvR896MTF+M/+LPQP8hF7/ye+Osd8Zf1C75re97trH/7/IA+rdYjOruh83136Qz92T+U43LXv6580/eovsfXqVlLWdvinFH0hDnc0gdpEbIPOIUTbWgUivivQwaR4a12sMWHSJkKNbY4oF65gRM1zNWU66c8WxswoPLhrkkzCpEJswiiBZQsugaMMgw0Nga3t4quKDDSnGg3782Jugw4RsKZxoCsBOVhy9Syt5rJKGrF1uIrdCIBrefyaZlQ8uwZcKwY8awfXMk49tasOMC9Oy3IJuugXs/gOg+lYtfanJ70Wr+8C0/o6rCTcJzeT3rr1b9hBW5wbW/+K4PjWye/dnkL7+QHn+kEU1smWD/kYw9J5we7wgne8hSBu1MSB3a90jm0TwYBF5VlVOKNCo7BkTXcOVsEVeNGc4MjkVhSuZYz3CgZ+nkA07/sFtYTt5IyBX0lFqgYgzlqld9Csw7KAhkUFyUwzEB01cdzO0NPZpEBuqFy4+toVUzjMQwXgsxf/OIYeuk4cwpwzlbI8bPGkd3Xgk73o7MvB7d/wfwyG/B+vV5dMGba/1vPvJjzas/+mHVXVZkt3suBhA9e9O5wat+wj4kN/zSOfe+95WN781ftsHdli7st9H2TSP0EqWfe3q5aOoMiUGSolvjQIrtGerDRrnBFFF5NsPpGRVT2dYwEHccvK0spsFbNK3nnFFlIfHMpULPhTHWknzti/SjWOetaxN+rSKIg5Hs6r6yYX9IKjFfBqKTNix2C0mukVDulW7fCpEV6rGhGZtQ67csM03YMGbYvM6ybYMwvn0Czn8ZnPmPkOnXoyc+ASf/G3LG+Zk951X19ImF329e/dEP6603RiI35zzHV/QcXIfqTTfoJWLSuY//5dvtT/z4XzevW9w2+ekHsrlD2O0zLelmnl7u6XujiYr2vYa7EyTS1YmETWQDDkCpKzasygVRU+5FKW6cKbs1qmt66su5L5XJ2dyEjoflFOnnMpidNTJY6yZV0Kgqx6mDH6AS9QsWzxDULw9fKyNcUk7viC3o25EJZI7ICrWi1m/VLGMNw/qGZXrUMDMubJowrD9zBnZeiW66Cpm8HPb/Lix+GpnZmdkt2+vuyfRzf/2if/vTqmpBHM/DK3pO8eNmvH7i7VZu2H14cdun3zr63dd+YeTazrrsL/dmx046e8b6CVKM9uYcCYaeCHkGecmO86FDN+AAFIMFpYY+FSLIQD1njX62Dlo5UuwoEVXpUmz3EFjfCDlHN1d6uQZmcGUOfy2iV7R5h/VA0f2vLgCnwCBLwzOhpDWDQVmxRokCwUNtJCWrR+o1Q7NmGG1YJhqWiYZhvGXYMNVk087NyNkXoFOXIs1J/G0/j3TuRLadmdnNW+r5keadyz/7C7uuUXU33SRy883PThDiecsB1uQDn9hl5Ybdbul3r7qyedU5n6ntu2167q8Op4/MxpEbWc9C2mLvYs6RnrCUCiupp5MpqQuDlZkLLd9yDZpfI4o9XCvLmp0Ja1h2rIV9tNzjNrihUXGoufPkHlJfTPUOhZnklD3YukaloSSniAzUpcNEjwygXlsMclojUgudPq1FQj0yNCMjozXDeCNisi5sbEVsnx7hvO3r2bF9HWObp4l3nIvzOckdHyHqP6720nOdffG1NTc/+sWVf/pv3r7+C2ZZb/RGbv5b8f5vV8H9jVXd82IAALfeenV07bW35wd++dyLNly3c3fz6IMXHfr0k+k9x61t16ckb0xzpAuHVzMWE6WdKf0cUqekxaFk3uP8cPmM91pdUqUFkFSF/DHDHVyVPZyD8my4oVcDPFeCUGVR51TVFZ6orBK8FrGosiN5MCtcUhBOkcu1RrAS4n7B4iEKHT6asWWkHslY3TBRt2yZaHHWhgm2bhxn08woG7dMaWuyIfNP7qF9/xeYGu+51pVbjXnRK23/WOPjx1/zB+85C9N/Gof/t53p6TWAqif4/Bamrvh3r/yDdf3j37f3loP89RM+PSTjkRvZRD8aYzET5ld7utzP6Tsl80iupSGoeq8BUh4aQKFGq0PKRXlEJZ02QI0ydM0D1yHVqZvqKo413n1tSCj/vUA0kWJrp1TIXDJgAobYb0SMQa2I1K0htiaUe7GlERlGakanx0Zk28wk26YnmRqvs26ixrrRiKw9z9yebyKz+/T8bdZNXbW9lp91ad47mt44/vZP/xvEoL/6tA7/bzvX028AAHojgx/04G/tfN/6WvdfrT6yPPFX9/b8/St112uuN3Z8RlzU0naqrKaZ9DNHmjvSLCdxrlxRq6oqvlyrpb6YPRpMnxUy4ANCEJWObOVThvKV1bCh3wba1aFSt6wRFEd0DQFMhrP8RQKoRkQiI1grWjOGehxJPbY0IstYq87mqXWcMb2O9aMNRmuGhnX0VuY4eXAvOntQzx9J3OWXT9amXnk23drGexfuO/7T2z7w9a+pqilQR30eQryedgMosmiBG0XkZv+/dk3tvOLFYx/oney9c89BH3/piVwfWibr2FGJRydNPDouEjeGocA5sjwncx7vPE493gfD936YrpW9hQpWV4VxGY4oVrT1VCtfp8ObvEY8njU6vJzC5x/EfmOCVF5RlQS3b8PwRhTRiCOatYhGZJloNdi4bgyrGSQdOkuzJEuzOpIt+fPGPC85dyQ+75J19DesP9ZdjT/0pz9x+3/4GUieY50v/1s8wLcLCQC3/siml26dbP7c/IJ/yxNzrnX/CcfjK6KzieRdtUqtKVGjITauY6wNWze9HySDYkLmneduoJxVPbmBOPUgcVSMGa66L/v16v2azkbpC4pbHejtQ4Cn0hkeGoFAYQCmkGql2CloBwBQzQgWRw1H5FKVvKf02oy6nm4ewZw9HUWXndngzLPG0Inxg4lEf3Dfb93x+9+zl1lE0F/VZ+Ly/34aAMCNN2JuuniXlIbwkTfPnHvRGRPf28mjtx9fNS8+supHjrU9J7qexb5nOfGkXkhzH8pBGdDBnrJlvHTBA0+gFSXzIhkLAb2QtjNSwQ1KGLq6vLqAiqtS+GXJWpFuCSmhGTATyzavUSUqdiE2TFiQNRor0yMRm0aETRMRGycM4+MxjYnGcVOzX11Y8bv/4F8/cMtvwwrArTdeHV1z8+3uWbr8v+ls9bSWgU83N+CmG6kOLXz4bdvPXt9oXOlN/coUe0G3r5u9teu8yKhTYheEQzSOTNGmDci+9xBZ4+PISpgtVIt6tUa8CbqPKoJYVEVUvReJrJEoQmNj8T4LsqcCauxgYdNwBEFFvVdjimXuooL3a3b1FGmh4rwgBmNFjeZi8FKLjUai1CLj44ikZugY/Dyx7lfMA51Ofs/Hdj/2wIcOs1D1ltyw2z8PB/8dxQHk77Kwb+cRruFqc81Nt7lKu3Xwet+51LfsnGhNm/U107C+ERl1NjeNxGi/XqgsdqARhb83YqOddmYBbN16gEZstJ+Fz51sRT7KWtKre2kmRhltQxuasdFe3cto8e/2spa4pBt+nlEGn9OKjc6b3NjF8P1cHPbzDT7WzU2zeJ/NVgRGadOmGYvOOusf2pukN98+26OqBFc9dOBZHPwzfu6n0wCe9Q9xI5iLd+2SmYtOyjVc480HP+jXqI3/A3kFlRQVdt9gbnvopMw+fLvu2s1zue1/bwzgtHkl/QdmAKf5V3reDOKF1/9n7Okp75O/pxf6hddpMAB54SG88FD/Xj7I70RMe1r17Quvp/cyf49/Nj1NN1eepfH/g/QQ9v8QQz/VUOQfWAj4Py58vZDtvmAALxjBC68XXi+8Xng9t9f/H2EmezgERB1nAAAAAElFTkSuQmCC" alt="Fmify logo"><div><div class="lfmc-title">Fmify <span style="font-size:11px;font-weight:600;color:#FF6A00;border:1px solid #FF6A00;border-radius:999px;padding:1px 7px;vertical-align:middle">v${VERSION} beta</span></div><div class="lfmc-sub"><strong>Keep every beat of your journey.</strong> <span style="color:#FF6A00">🧡</span></div></div></div><button class="lfmc-close" aria-label="Close">×</button></header><div class="lfmc-body"><aside class="lfmc-side"><nav class="lfmc-nav"><button data-tab="overview" class="active">◉ &nbsp; Overview</button><button data-tab="history">◷ &nbsp; History</button><button data-tab="charts">▥ &nbsp; Charts</button><button data-tab="settings">⚙ &nbsp; Settings</button></nav></aside><main class="lfmc-main" id="lfmc-content"></main></div><footer class="lfmc-status"><span id="lfmc-status">${isConnected()?"Connected to Last.fm":"Not connected · Add API credentials in Settings"}</span><span>v${VERSION} beta</span></footer></section>`;
-    document.body.appendChild(overlay);overlay.querySelectorAll("[data-tab]").forEach(x=>x.classList.toggle("active",x.dataset.tab===state.tab));overlay.querySelector(".lfmc-close").onclick=()=>overlay.remove();overlay.querySelectorAll("[data-tab]").forEach(b=>b.onclick=()=>{state.tab=b.dataset.tab;overlay.querySelectorAll("[data-tab]").forEach(x=>x.classList.toggle("active",x.dataset.tab===state.tab));renderTab();});renderTab();
+
+  // Inline vector brand marks keep service and navigation logos sharp at any size.
+  function brandMark(id, extraClass=""){
+    const common='viewBox="0 0 32 32" width="100%" height="100%" aria-hidden="true" focusable="false"';
+    if(id==="lastfm") return `<svg class="${extraClass}" ${common}><circle cx="16" cy="16" r="11.2" fill="none" stroke="currentColor" stroke-width="2.6"/><path d="M7.5 16h4.2c1.8 0 2.3-4.1 4.4-4.1 1.8 0 2.1 4.1 4.1 4.1h4.3M9.2 20.3h3.2c1.4 0 1.8-2.6 3.3-2.6 1.4 0 1.7 2.6 3.1 2.6h3.8" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    if(id==="listenbrainz") return `<svg class="${extraClass}" ${common}><text x="16" y="23" text-anchor="middle" fill="currentColor" font-family="Arial,sans-serif" font-size="22" font-weight="800" letter-spacing="-2">lb</text></svg>`;
+    if(id==="statsfm") return `<svg class="${extraClass}" ${common}><path d="M5 25V17M11 25V11M17 25V7M23 25V13M29 25V4" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="square"/></svg>`;
+    if(id==="home") return `<svg class="${extraClass}" ${common}><path d="m4 14 12-10 12 10M7.5 12.5V28h17V12.5M13 28V18h6v10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    if(id==="charts") return `<svg class="${extraClass}" ${common}><path d="M4 25 12 17l5 4 10-12M19 9h8v8" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    if(id==="history") return `<svg class="${extraClass}" ${common}><circle cx="16" cy="16" r="11.5" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M16 8.5V16l5.2 3" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    if(id==="settings") return `<svg class="${extraClass}" ${common}><path d="M13 3h6l.8 3.1 2.4 1.4 3-.8 3 5.2-2.2 2.2v2.8l2.2 2.2-3 5.2-3-.8-2.4 1.4L19 28h-6l-.8-3.1-2.4-1.4-3 .8-3-5.2L9 16.9v-2.8l-2.2-2.2 3-5.2 3 .8L13 3Z" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linejoin="round"/><circle cx="16" cy="15.5" r="3.5" fill="none" stroke="currentColor" stroke-width="2.1"/></svg>`;
+    return "";
   }
-  function renderTab(){const root=document.querySelector("#lfmc-content");if(!root)return;document.querySelectorAll("#lfmc-overlay [data-tab]").forEach(x=>x.classList.toggle("active",x.dataset.tab===state.tab));root.innerHTML="<div class='lfmc-empty'>Loading…</div>";
-    if(state.tab==="settings")return renderSettings(root);
-    if(state.tab==="overview")return renderOverview(root);
-    if(state.tab==="history")return renderHistory(root);
-    if(state.tab==="charts")return renderCharts(root);
+  function navMark(id){return brandMark(id);}
+
+  function openDashboard(){if(document.getElementById("lfmc-overlay"))return;
+    const overlay=document.createElement("div");overlay.id="lfmc-overlay";overlay.addEventListener("click",e=>{if(e.target===overlay)overlay.remove();});
+    const tabs=[['lastfm','Last.fm'],['listenbrainz','ListenBrainz'],['statsfm','stats.fm'],['overview','Home'],['charts','Charts'],['history','History'],['settings','Settings']];
+    overlay.innerHTML=`<section id="lfmc-panel">
+      <header class="lfmc-head">
+        <div class="lfmc-brand">
+          <div class="lfmc-logo"><span>≋</span></div>
+          <div class="lfmc-title">Fmify <span class="lfmc-head-version">v${VERSION}</span></div>
+        </div>
+        <button class="lfmc-close" aria-label="Close">×</button>
+      </header>
+      <div class="lfmc-body">
+        <main class="lfmc-main" id="lfmc-content"></main>
+      </div>
+      <aside class="lfmc-bottom"><nav class="lfmc-nav">${tabs.map(([id,label,icon])=>`<button data-tab="${id}" class="${state.tab===id?'active':''}" title="${label}"><span class="lfmc-nav-icon ${id==='listenbrainz'?'lfmc-lb-icon':''}">${navMark(id==='overview'?'home':id)}</span><span>${label}</span></button>`).join('')}</nav></aside>
+      <footer class="lfmc-status"><span id="lfmc-status">${isConnected()?'Connected to Last.fm':'Connect a service in Settings'}</span><div id="lfmc-log" class="lfmc-log">${activity.slice(-1).map(l=>`<div>${esc(l)}</div>`).join('')}</div><span class="lfmc-version">v${VERSION} beta</span></footer>
+    </section>`;
+    document.body.appendChild(overlay);overlay.querySelector('.lfmc-close').onclick=()=>overlay.remove();overlay.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{state.tab=b.dataset.tab;renderTab();});renderTab();
+  }
+  function renderTab(){const root=document.querySelector('#lfmc-content');if(!root)return;document.querySelectorAll('#lfmc-overlay [data-tab]').forEach(x=>x.classList.toggle('active',x.dataset.tab===state.tab));root.innerHTML="<div class='lfmc-empty'>Loading…</div>";
+    if(state.tab==='settings')return renderSettings(root);
+    if(state.tab==='overview')return renderOverview(root);
+    if(state.tab==='history')return renderHistory(root);
+    if(state.tab==='charts')return renderCharts(root);
+    if(state.tab==='lastfm')return renderServiceStats(root,'lastfm');
+    if(state.tab==='listenbrainz')return renderServiceStats(root,'listenbrainz');
+    if(state.tab==='statsfm')return renderServiceStats(root,'statsfm');
   }
   function renderSettings(root){
     const toggle=(id,label,key,def="true")=>`<div class="lfmc-field"><label>${label}</label><button class="lfmc-btn secondary" id="${id}">${get(key,def)==="true"?"ON":"OFF"}</button></div>`;
@@ -345,7 +1093,7 @@
       <div style="font-weight:700">ListenBrainz</div>
       <div class="lfmc-field"><label>ListenBrainz user token</label><div style="display:flex;gap:8px;align-items:center"><input id="lfmc-lb-token" type="password" value="${esc(get(STORE.lbToken))}" placeholder="Paste your ListenBrainz user token" style="flex:1;min-width:0"><button type="button" class="lfmc-btn secondary lfmc-visibility" data-target="lfmc-lb-token" aria-label="Show ListenBrainz token" title="Show ListenBrainz token">👁</button></div></div>
       <div class="lfmc-field"><label>ListenBrainz username</label><input id="lfmc-lb-user" value="${esc(get(STORE.lbUser))}" placeholder="Filled automatically when token validates"></div>
-      <div class="lfmc-actions"><button class="lfmc-btn" id="lfmc-lb-connect">Validate & Connect</button><a class="lfmc-btn secondary" href="https://listenbrainz.org/settings" target="_blank" rel="noopener noreferrer" style="text-decoration:none;display:inline-flex;align-items:center">Get Token</a><button class="lfmc-btn secondary" id="lfmc-lb-disconnect">Disconnect</button></div>
+      <div class="lfmc-actions"><button class="lfmc-btn" id="lfmc-lb-connect" ${isLBConnected()?'disabled aria-disabled="true"':""}>${isLBConnected()?"✓ Connected":"Validate & Connect"}</button><a class="lfmc-btn secondary" href="https://listenbrainz.org/settings" target="_blank" rel="noopener noreferrer" style="text-decoration:none;display:inline-flex;align-items:center">Get Token</a><button class="lfmc-btn secondary" id="lfmc-lb-disconnect">Disconnect</button></div>
       <p class="lfmc-note">${isLBConnected()?`Connected as ${esc(get(STORE.lbUser,"ListenBrainz user"))}.`:"Not connected. Validate your personal token to connect."}</p>
       <details class="lfmc-settings-dropdown" style="margin-top:12px;border:1px solid #383838;border-radius:10px;background:#191919;overflow:hidden">
         <summary style="padding:13px 14px;cursor:pointer;font-weight:700;list-style:none;display:flex;align-items:center;justify-content:space-between">
@@ -362,11 +1110,24 @@
       </details>
       <p class="lfmc-note">ListenBrainz does not provide a track-love equivalent in this extension; Spotify liked-track syncing is currently supported for Last.fm only.</p>
     </div>
+    <div class="lfmc-card" style="margin-top:14px">
+      <div style="font-weight:700">stats.fm</div>
+      <div class="lfmc-field"><label>stats.fm access token</label><div style="display:flex;gap:8px;align-items:center"><input id="lfmc-statsfm-token" type="password" value="${esc(get(STORE.statsfmToken))}" placeholder="Paste your stats.fm access token" style="flex:1;min-width:0"><button type="button" class="lfmc-btn secondary lfmc-visibility" data-target="lfmc-statsfm-token" aria-label="Show stats.fm token" title="Show stats.fm token">👁</button></div></div>
+      <div class="lfmc-actions"><button class="lfmc-btn" id="lfmc-statsfm-connect">${get(STORE.statsfmToken)?"Validate & Reconnect":"Validate & Connect"}</button><a class="lfmc-btn secondary" href="https://stats.fm" target="_blank" rel="noopener noreferrer" style="text-decoration:none">Open stats.fm</a><button class="lfmc-btn secondary" id="lfmc-statsfm-disconnect">Disconnect</button></div>
+      <p class="lfmc-note">Import your stats.fm access token and Fmify will validate it using your authenticated account endpoint. Your token is stored locally in Spicetify. Fmify never asks for your Spotify password.</p>
+      <p class="lfmc-note">${get(STORE.statsfmToken)?`Token saved${get(STORE.statsfmUser)?` · account ID ${esc(get(STORE.statsfmUser))}`:""}. Validate it to confirm access.`:"Not connected. Paste a valid stats.fm access token to connect."}</p>
+    </div>
+    <div class="lfmc-card" style="margin-top:14px"><div style="font-weight:700">Home screen services</div><p class="lfmc-note">Choose which service cards appear on Home.</p>${toggle('lfmc-home-lastfm','Show Last.fm on Home',STORE.homeLastfm)}${toggle('lfmc-home-lb','Show ListenBrainz on Home',STORE.homeListenbrainz)}${toggle('lfmc-home-statsfm','Show stats.fm on Home',STORE.homeStatsfm)}</div>
     <details class="lfmc-card" style="margin-top:14px">
       <summary style="cursor:pointer;font-weight:700;list-style:none">General settings <span style="color:#FF6A00">▼</span></summary>
       ${toggle("lfmc-master-toggle","Master scrobbling switch",STORE.enabled)}
       <p class="lfmc-note">The master switch pauses all scrobbling. Service switches above can pause Last.fm or ListenBrainz independently.</p>
-    </details>`;
+    </details>
+    <div class="lfmc-card" style="margin-top:14px">
+      <div style="font-weight:700">Storage &amp; cache</div>
+      <p class="lfmc-note">Clear cached chart results and artwork lookups if images or chart data look outdated. Your service connections, settings, listening history and queued scrobbles will be kept.</p>
+      <div class="lfmc-actions"><button class="lfmc-btn secondary" id="lfmc-clear-cache">Clear cache</button></div>
+    </div>`;
     root.querySelectorAll(".lfmc-visibility").forEach(button=>{
       button.addEventListener("click",()=>{
         const input=root.querySelector("#"+button.dataset.target);
@@ -380,6 +1141,17 @@
     });
     const bindToggle=(id,key,def="true",message="Setting")=>{
       root.querySelector("#"+id).onclick=()=>{const v=get(key,def)==="true"?"false":"true";set(key,v);root.querySelector("#"+id).textContent=v==="true"?"ON":"OFF";status(`${message} ${v==="true"?"enabled":"disabled"}`);};
+    };
+    root.querySelector("#lfmc-clear-cache").onclick=()=>{
+      const confirmed=window.confirm("Clear Fmify's cached chart data and artwork lookups? Your connections, settings, listening history and queued scrobbles will not be deleted.");
+      if(!confirmed)return;
+      set(`${EXT}:spotifyArt`,"{}");
+      state.chartCache=Object.create(null);
+      state.dashboard=null;
+      state.chartLoadDurations=[];
+      status("Cache cleared · chart and artwork data will refresh when needed");
+      const button=root.querySelector("#lfmc-clear-cache");
+      if(button){button.textContent="Cache cleared";button.disabled=true;}
     };
     root.querySelector("#lfmc-connect").onclick=async()=>{
       const key=root.querySelector("#lfmc-key").value.trim(),secret=root.querySelector("#lfmc-secret").value.trim();
@@ -398,6 +1170,27 @@
     bindToggle("lfmc-lb-toggle",STORE.lbEnabled,"true","ListenBrainz scrobbling");
     bindToggle("lfmc-lb-nowplaying",STORE.lbNowPlaying,"true","ListenBrainz Now Playing");
     bindToggle("lfmc-master-toggle",STORE.enabled,"true","Master scrobbling");
+    bindToggle("lfmc-home-lastfm",STORE.homeLastfm,"true","Last.fm Home card");
+    bindToggle("lfmc-home-lb",STORE.homeListenbrainz,"true","ListenBrainz Home card");
+    bindToggle("lfmc-home-statsfm",STORE.homeStatsfm,"true","stats.fm Home card");
+    root.querySelector('#lfmc-statsfm-connect').onclick=async()=>{
+      const input=root.querySelector('#lfmc-statsfm-token'),button=root.querySelector('#lfmc-statsfm-connect');
+      const token=input.value.trim();
+      if(!token){status('Paste your stats.fm access token first',true);return;}
+      button.disabled=true;button.textContent='Validating…';
+      try{
+        const me=await statsFmRequest('/me',token);
+        const account=statsFmAccountFromMe(me);
+        if(!account)throw new Error('stats.fm responded, but no authenticated user ID was returned. Check that this is an account access token, not a Spotify token.');
+        set(STORE.statsfmToken,token);set(STORE.statsfmUser,account.id);set(`${EXT}:statsfmName`,account.name);
+        state.chartCache=Object.create(null);button.textContent='✓ Connected';
+        status(`stats.fm connected as ${account.name}`);renderTab();
+      }catch(e){status(`stats.fm connection failed: ${e.message}`,true);button.disabled=false;button.textContent='Validate & Connect';}
+    };
+    root.querySelector('#lfmc-statsfm-disconnect').onclick=()=>{
+      set(STORE.statsfmToken,'');set(STORE.statsfmUser,'');set(`${EXT}:statsfmName`,'');
+      status('stats.fm disconnected');renderTab();
+    };
     const saveNumbers=(prefix,keys)=>{
       const values=[["mintrack",keys[0],0,600,30],["percent",keys[1],1,99,50],["delay",keys[2],1,1200,240]];
       for(const [id,key,min,max,def] of values){
@@ -408,7 +1201,14 @@
     };
     root.querySelector("#lfmc-lfm-save").onclick=()=>saveNumbers("lfm",[STORE.lfmMinTrack,STORE.lfmPercent,STORE.lfmDelay]);
     root.querySelector("#lfmc-lb-save").onclick=()=>saveNumbers("lb",[STORE.lbMinTrack,STORE.lbPercent,STORE.lbDelay]);
-    root.querySelector("#lfmc-lb-connect").onclick=async()=>{
+    const lbConnectButton=root.querySelector("#lfmc-lb-connect");
+    if(isLBConnected()){
+      lbConnectButton.title="ListenBrainz is already connected";
+      lbConnectButton.style.background="linear-gradient(135deg,rgba(45,160,105,.9),rgba(30,120,78,.9))";
+      lbConnectButton.style.opacity="1";
+      lbConnectButton.style.cursor="default";
+    }
+    lbConnectButton.onclick=async()=>{
       const token=root.querySelector("#lfmc-lb-token").value.trim();if(!token){status("Paste your ListenBrainz user token first",true);return;}
       set(STORE.lbToken,token);
       try{const r=await fetch("https://api.listenbrainz.org/1/validate-token",{headers:{Authorization:`Token ${token}`}});const j=await r.json();if(!r.ok||!j.valid)throw new Error(j.message||"Invalid ListenBrainz token");
@@ -417,20 +1217,318 @@
     };
     root.querySelector("#lfmc-lb-disconnect").onclick=()=>{set(STORE.lbToken,"");set(STORE.lbUser,"");set(`${EXT}:lbMsids`,"{}");status("ListenBrainz disconnected");renderTab();};
   }
-  async function renderOverview(root){const t=state.track;root.innerHTML=`<div class="lfmc-toprow"><div><div class="lfmc-tabtitle">Your listening</div><div class="lfmc-muted">A live look at what you're playing.</div></div><button class="lfmc-btn secondary" id="lfmc-refresh">Refresh</button></div><div class="lfmc-grid"><div class="lfmc-card"><div class="lfmc-label">Connection</div><div class="lfmc-number" style="font-size:18px;color:${isConnected()?"#72d69a":"#ff958d"}">${(isConnected()||isLBConnected())?"Connected":"Not connected"}</div><div class="lfmc-muted">${esc([isConnected()?"Last.fm: "+get(STORE.username):"",isLBConnected()?"ListenBrainz: "+get(STORE.lbUser):""].filter(Boolean).join(" · ")||"Connect a service in Settings")}</div></div><div class="lfmc-card"><div class="lfmc-label">Queued scrobbles</div><div class="lfmc-number">${readQueue().length+readLBQueue().length}</div><div class="lfmc-muted">Last.fm + ListenBrainz retries</div></div><div class="lfmc-card"><div class="lfmc-label">Scrobbling</div><div class="lfmc-number" style="font-size:18px">${get(STORE.enabled,"true")==="true"?"Enabled":"Paused"}</div><div class="lfmc-muted">Automatic tracking</div></div></div><div class="lfmc-now">${t?.cover?`<img class="lfmc-cover" src="${esc(t.cover)}">`:`<div class="lfmc-cover" style="display:grid;place-items:center;font-size:28px">♫</div>`}<div style="min-width:0"><div class="lfmc-label">Now playing</div><div class="lfmc-track">${esc(t?.title||"Nothing playing")}</div><div class="lfmc-artist">${esc(t?.artists||"Start a track in Spotify")}</div><span class="lfmc-pill">${Spicetify.Player.isPlaying()?"PLAYING":"IDLE"}</span></div></div><div class="lfmc-section">Recent Last.fm scrobbles</div><div id="lfmc-recent" class="lfmc-list"><div class="lfmc-empty">${isConnected()?"Loading listening history…":"Connect Last.fm to see your recent history."}</div></div>`;
-    root.querySelector("#lfmc-refresh").onclick=()=>renderOverview(root);
-    if(isConnected()){try{const r=await api("user.getRecentTracks",{user:get(STORE.username),limit:"6",extended:"1"},false);const tracks=r.recenttracks?.track||[];if(root.querySelector("#lfmc-recent"))root.querySelector("#lfmc-recent").innerHTML=tracks.length?tracks.filter(x=>!x["@attr"]?.nowplaying).slice(0,5).map(trackRow).join(""):"<div class='lfmc-empty'>No scrobbles yet.</div>";}catch(e){if(root.querySelector("#lfmc-recent"))root.querySelector("#lfmc-recent").innerHTML=`<div class="lfmc-empty">${esc(e.message)}</div>`;}}
+  async function renderOverview(root){const t=state.track;const services=[];
+    if(get(STORE.homeLastfm,'true')==='true')services.push(`<button class="lfmc-service-chip" data-go="lastfm"><span class="lfmc-service-logo lfmc-lastfm-logo">${brandMark('lastfm')}</span><span class="lfmc-service-copy"><strong>Last.fm</strong><small><i class="${isConnected()?'is-connected':''}"></i>${isConnected()?'Connected':'Not connected'}</small></span></button>`);
+    if(get(STORE.homeListenbrainz,'true')==='true')services.push(`<button class="lfmc-service-chip" data-go="listenbrainz"><span class="lfmc-service-logo lfmc-listenbrainz-logo">${brandMark('listenbrainz')}</span><span class="lfmc-service-copy"><strong>ListenBrainz</strong><small><i class="${isLBConnected()?'is-connected':''}"></i>${isLBConnected()?'Connected':'Not connected'}</small></span></button>`);
+    if(get(STORE.homeStatsfm,'true')==='true')services.push(`<button class="lfmc-service-chip" data-go="statsfm"><span class="lfmc-service-logo lfmc-statsfm-logo">${brandMark('statsfm')}</span><span class="lfmc-service-copy"><strong>stats.fm</strong><small><i class="${get(STORE.statsfmToken)?'is-connected':''}"></i>${get(STORE.statsfmToken)?'Connected':'Not connected'}</small></span></button>`);
+    root.innerHTML=`<section class="lfmc-home">
+      <div class="lfmc-home-hero"><div class="lfmc-home-wordmark">Fmi<span>fy</span></div><div class="lfmc-home-tagline">Track your music across platforms</div></div>
+      <div class="lfmc-service-row">${services.join('')}</div>
+      <div class="lfmc-home-lower">${t?`<div class="lfmc-home-now"><div class="lfmc-home-now-label">NOW PLAYING ON SPOTIFY</div><strong>${esc(t.title||'')}</strong><span>${esc(t.artists||'')}</span></div>`:''}<div class="lfmc-home-meta"><span><i class="is-connected"></i> ${get(STORE.enabled,'true')==='true'?'Scrobbling enabled':'Scrobbling paused'}</span><span>${readQueue().length+readLBQueue().length} queued scrobbles</span></div></div>
+    </section>`;
+    root.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>{state.tab=b.dataset.go;renderTab();});
   }
   function trackRow(t){const img=t.image?.find(x=>x.size==="medium")?.["#text"]||t.image?.[2]?.["#text"]||"";return `<div class="lfmc-row">${img?`<img src="${esc(img)}">`:`<div style="width:42px;height:42px;background:#333;border-radius:6px;display:grid;place-items:center">♫</div>`}<div class="lfmc-rowinfo"><div class="lfmc-rowtitle">${esc(t.name||t.track?.name)}</div><div class="lfmc-rowartist">${esc(t.artist?.name||t.artist?.["#text"]||"")}</div></div><div class="lfmc-muted">${t.date?.uts?new Date(Number(t.date.uts)*1000).toLocaleDateString():"Now"}</div></div>`;}
   function lbListenRow(listen){const m=listen.track_metadata||{},a=m.additional_info||{},img=m.mbid_mapping?.caa_id&&m.mbid_mapping?.caa_release_mbid?`https://coverartarchive.org/release/${m.mbid_mapping.caa_release_mbid}/${m.mbid_mapping.caa_id}-250.jpg`:"";return `<div class="lfmc-row">${img?`<img src="${esc(img)}">`:`<div style="width:42px;height:42px;background:#333;border-radius:6px;display:grid;place-items:center">♫</div>`}<div class="lfmc-rowinfo"><div class="lfmc-rowtitle">${esc(m.track_name||"Unknown track")}</div><div class="lfmc-rowartist">${esc(m.artist_name||"Unknown artist")}${m.release_name?" · "+esc(m.release_name):""}</div></div><div class="lfmc-muted">${listen.listened_at?new Date(Number(listen.listened_at)*1000).toLocaleDateString():""}</div></div>`;}
   async function lbPublic(path){const res=await fetch(`https://api.listenbrainz.org${path}`);const raw=await res.text();let data={};try{data=raw?JSON.parse(raw):{};}catch{}if(!res.ok)throw new Error(data.error||`ListenBrainz API error ${res.status}`);return data;}
-  async function renderHistory(root){root.innerHTML=`<div class="lfmc-toprow"><div><div class="lfmc-tabtitle">Listening history</div><div class="lfmc-muted">Browse recent listens from either service.</div></div><div style="display:flex;gap:8px"><select id="lfmc-history-service" class="lfmc-select"><option value="lastfm">Last.fm</option><option value="listenbrainz">ListenBrainz</option></select><select id="lfmc-limit" class="lfmc-select"><option value="20">20 tracks</option><option value="50">50 tracks</option><option value="100">100 tracks</option></select></div></div><div id="lfmc-history" class="lfmc-list"><div class="lfmc-empty">Loading…</div></div>`;
-    const load=async()=>{const dest=root.querySelector("#lfmc-history"),service=root.querySelector("#lfmc-history-service").value;dest.innerHTML="<div class='lfmc-empty'>Loading…</div>";try{if(service==="lastfm"){if(!isConnected())throw new Error("Connect Last.fm in Settings first.");const r=await api("user.getRecentTracks",{user:get(STORE.username),limit:root.querySelector("#lfmc-limit").value,extended:"1"},false);const tracks=r.recenttracks?.track||[];dest.innerHTML=tracks.map(trackRow).join("")||"<div class='lfmc-empty'>No listening history yet.</div>";}else{if(!isLBConnected())throw new Error("Connect ListenBrainz in Settings first.");const r=await lbPublic(`/1/user/${encodeURIComponent(get(STORE.lbUser))}/listens?count=${root.querySelector("#lfmc-limit").value}`);const listens=r.payload?.listens||[];dest.innerHTML=listens.map(lbListenRow).join("")||"<div class='lfmc-empty'>No listening history yet.</div>";}}catch(e){dest.innerHTML=`<div class='lfmc-empty'>${esc(e.message)}</div>`;}};root.querySelector("#lfmc-limit").onchange=load;root.querySelector("#lfmc-history-service").onchange=load;await load();}
-  async function renderCharts(root){root.innerHTML=`<div class="lfmc-toprow"><div><div class="lfmc-tabtitle">Your charts</div><div class="lfmc-muted">Top tracks from your connected listening service.</div></div><div style="display:flex;gap:8px"><select id="lfmc-chart-service" class="lfmc-select"><option value="lastfm">Last.fm</option><option value="listenbrainz">ListenBrainz</option></select><select id="lfmc-chart-kind" class="lfmc-select"><option value="recordings">Tracks</option><option value="artists">Artists</option><option value="releases">Albums</option></select><select id="lfmc-period" class="lfmc-select"><option value="7day">7 days</option><option value="1month">1 month</option><option value="3month">3 months</option><option value="6month">6 months</option><option value="12month">12 months</option><option value="overall">All time</option></select></div></div><div id="lfmc-chartlist" class="lfmc-list"><div class="lfmc-empty">Loading charts…</div></div>`;
-    const period=root.querySelector("#lfmc-period"),service=root.querySelector("#lfmc-chart-service"),kind=root.querySelector("#lfmc-chart-kind");
-    const syncPeriod=()=>{const lb=service.value==="listenbrainz";period.innerHTML=lb?'<option value="week">This week</option><option value="month">This month</option><option value="year">This year</option><option value="all_time">All time</option>':'<option value="7day">7 days</option><option value="1month">1 month</option><option value="3month">3 months</option><option value="6month">6 months</option><option value="12month">12 months</option><option value="overall">All time</option>';};
-    const load=async()=>{const dest=root.querySelector("#lfmc-chartlist");dest.innerHTML="<div class='lfmc-empty'>Loading…</div>";try{if(service.value==="lastfm"){if(!isConnected())throw new Error("Connect Last.fm in Settings first.");const method={recordings:"user.getTopTracks",artists:"user.getTopArtists",releases:"user.getTopAlbums"}[kind.value];const r=await api(method,{user:get(STORE.username),period:period.value,limit:"20"},false);const rows=kind.value==="recordings"?(r.toptracks?.track||[]):kind.value==="artists"?(r.topartists?.artist||[]):(r.topalbums?.album||[]);dest.innerHTML=rows.map((t,i)=>`<div class="lfmc-row"><div style="width:30px;color:#d77;font-weight:750;text-align:center">${i+1}</div><div class="lfmc-rowinfo"><div class="lfmc-rowtitle">${esc(t.name||t.title||"Unknown")}</div><div class="lfmc-rowartist">${esc(t.artist?.name||t.artist?.title||t.artist?.name||"")}</div></div><div class="lfmc-muted">${fmt(t.playcount)} plays</div></div>`).join("")||"<div class='lfmc-empty'>No chart data.</div>";}else{if(!isLBConnected())throw new Error("Connect ListenBrainz in Settings first.");const user=encodeURIComponent(get(STORE.lbUser)),range=period.value,endpoint={recordings:"recordings",artists:"artists",releases:"releases"}[kind.value];const r=await lbPublic(`/1/stats/user/${user}/${endpoint}?range=${encodeURIComponent(range)}&count=20`);const rows=r.payload?.[endpoint]||[];dest.innerHTML=rows.map((t,i)=>{const title=t.track_name||t.recording_name||t.artist_name||t.release_name||t.release_group_name||"Unknown";const sub=kind.value==="recordings"?t.artist_name:kind.value==="releases"?t.artist_name:"";return `<div class="lfmc-row"><div style="width:30px;color:#8bb5ef;font-weight:750;text-align:center">${i+1}</div><div class="lfmc-rowinfo"><div class="lfmc-rowtitle">${esc(title)}</div><div class="lfmc-rowartist">${esc(sub)}</div></div><div class="lfmc-muted">${fmt(t.listen_count)} listens</div></div>`;}).join("")||"<div class='lfmc-empty'>No chart data yet.</div>";}}catch(e){dest.innerHTML=`<div class='lfmc-empty'>${esc(e.message)}</div>`;}};
-    service.onchange=()=>{syncPeriod();load();};period.onchange=load;kind.onchange=load;syncPeriod();await load();}
+  async function renderHistory(root){
+    const stats=spotifyStats(),h=[...stats.history].sort((a,b)=>b.startedAt-a.startedAt);
+    const historyRows=items=>items.map(x=>`<div class="lfmc-row"><div class="lfmc-rank-art lfmc-rank-placeholder" data-itunes-art="1" data-art-type="track" data-art-name="${esc(x.title)}" data-art-artist="${esc(x.artist)}">♫</div><div class="lfmc-rowinfo"><div class="lfmc-rowtitle">${esc(x.title)}</div><div class="lfmc-rowartist">${esc(x.artist)} · ${(x.playedMs/60000).toFixed(1)} min listened</div></div><div class="lfmc-muted">${new Date(x.startedAt*1000).toLocaleString()}</div></div>`).join('');
+    root.innerHTML=`<div class="lfmc-tabtitle">Spotify history</div><div class="lfmc-muted">These stats are about your Spotify only. Fmify collects this locally from when tracking is enabled; it cannot recreate older history.</div><div class="lfmc-grid" style="margin:16px 0"><div class="lfmc-card"><div class="lfmc-label">Tracks recorded</div><div class="lfmc-number">${fmt(h.length)}</div></div><div class="lfmc-card"><div class="lfmc-label">Listening time</div><div class="lfmc-number">${(stats.total/3600000).toFixed(1)} hr</div></div><div class="lfmc-card"><div class="lfmc-label">Unique artists</div><div class="lfmc-number">${fmt(stats.artists.length)}</div></div></div><div class="lfmc-toprow"><div class="lfmc-section">Recently played</div><select id="lfmc-limit" class="lfmc-select"><option value="20">20 tracks</option><option value="50">50 tracks</option><option value="100">100 tracks</option><option value="250">250 tracks</option></select></div><div id="lfmc-history" class="lfmc-list">${h.length?historyRows(h.slice(0,20)):'<div class="lfmc-empty">No local Spotify history yet. Start listening with Fmify enabled.</div>'}</div>`;
+    const list=root.querySelector('#lfmc-history');
+    hydrateItunesArtwork(list);
+    root.querySelector('#lfmc-limit').onchange=e=>{list.innerHTML=historyRows(h.slice(0,Number(e.target.value)));hydrateItunesArtwork(list);};
+  }
+  let itunesQueue=Promise.resolve();
+  let itunesBackoffUntil=0;
+  const itunesGet=url=>{
+    const run=itunesQueue.then(async()=>{
+      await sleep(850);
+      const r=await fetch(url);
+      if(!r.ok)throw Object.assign(new Error("iTunes "+r.status),{code:r.status});
+      return r.json();
+    });
+    itunesQueue=run.catch(()=>{});
+    return run;
+  };
+  const normalizeArtworkText=v=>String(v||"").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g,"").replace(/\([^)]*\)/g," ").replace(/\b(feat\.?|featuring|ft\.?)\b.*$/i,"").replace(/[^a-z0-9]/g,"");
+  const artworkUrlFromResult=r=>{
+    const raw=r?.artworkUrl600||r?.artworkUrl100||r?.artworkUrl60||"";
+    return String(raw).replace(/\/(\d{2,4})x\1bb(?=\/|$)/,"/600x600bb").replace(/(\d{2,4})x(\d{2,4})bb/,"600x600bb");
+  };
+  async function itunesArtwork(type,name,artist=""){
+    if(!name)return "";
+    const key=`itunes|${type}|${name}|${artist}`.toLowerCase();
+    const cache=spotifyArtCache();
+    if(cache[key])return cache[key];
+    if(Date.now()<itunesBackoffUntil)return "";
+    const cleanName=String(name).replace(/\s*[\[(](?:feat|ft|with|remaster|remastered|deluxe|explicit)[^\])]*[\])]/ig," ").replace(/\s+/g," ").trim();
+    const cleanArtist=String(artist||"").replace(/\s*[\[(](?:feat|ft|with)[^\])]*[\])]/ig," ").trim();
+    const attempts=[];
+    if(type==="artist"){
+      attempts.push({entity:"musicArtist",term:cleanName,field:"artistName",want:cleanName});
+      attempts.push({entity:"album",term:cleanName,field:"artistName",want:cleanName,artistFallback:true});
+    }else if(type==="track"){
+      attempts.push({entity:"song",term:`${cleanName} ${cleanArtist}`.trim(),field:"trackName",want:cleanName});
+      attempts.push({entity:"song",term:cleanName,field:"trackName",want:cleanName});
+      if(cleanArtist)attempts.push({entity:"album",term:cleanArtist,field:"artistName",want:cleanArtist,artistFallback:true});
+    }else{
+      attempts.push({entity:"album",term:`${cleanName} ${cleanArtist}`.trim(),field:"collectionName",want:cleanName});
+      attempts.push({entity:"album",term:cleanName,field:"collectionName",want:cleanName});
+      if(cleanArtist)attempts.push({entity:"song",term:`${cleanName} ${cleanArtist}`.trim(),field:"trackName",want:cleanName,trackFallback:true});
+    }
+    const uniq=[...new Map(attempts.map(a=>[`${a.entity}|${a.term}`,a])).values()];
+    const norm=normalizeArtworkText;
+    for(const attempt of uniq){
+      try{
+        const url=`https://itunes.apple.com/search?term=${encodeURIComponent(attempt.term)}&entity=${attempt.entity}&limit=25&country=US`;
+        const json=await itunesGet(url);
+        const results=json.results||[];
+        const want=norm(attempt.want),wantArtist=norm(cleanArtist|| (type==="artist"?cleanName:""));
+        const scored=results.map(r=>{
+          const title=norm(r[attempt.field]),a=norm(r.artistName);
+          const titleExact=!!want&&title===want;
+          const titleClose=titleExact||(want.length>=4&&(title.includes(want)||want.includes(title)));
+          const artistExact=!wantArtist||a===wantArtist;
+          const artistClose=!wantArtist||(wantArtist.length>=4&&(a.includes(wantArtist)||wantArtist.includes(a)));
+          let score=(titleExact?8:titleClose?4:0)+(artistExact?6:artistClose?2:0);
+          if(attempt.artistFallback&&artistExact)score+=4;
+          if(attempt.trackFallback&&titleClose)score+=2;
+          return {r,score};
+        }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score);
+        const chosen=scored.find(x=>artworkUrlFromResult(x.r));
+        if(chosen){
+          const found=artworkUrlFromResult(chosen.r);
+          if(Object.keys(cache).length>1200)cache={};
+          cache[key]=found;
+          set(`${EXT}:spotifyArt`,JSON.stringify(cache));
+          logLine(`Artwork ${type} "${name}": found on iTunes`);
+          return found;
+        }
+      }catch(e){
+        if(e?.code===403||e?.code===429){itunesBackoffUntil=Date.now()+45000;logLine(`iTunes artwork rate limited; will retry later`);break;}
+        logLine(`iTunes artwork retry for "${name}" failed: ${e?.message||e}`);
+      }
+    }
+    // Do not permanently cache misses: a later render can retry after the catalogue responds.
+    logLine(`Artwork ${type} "${name}": no exact iTunes match after fallback searches`);
+    return "";
+  }
+  function itemArtwork(x,kind){
+    const candidates=[
+      x?.imageUrl,x?.image_url,x?.artworkUrl,x?.artwork_url,x?.coverUrl,x?.cover_url,
+      x?.image,x?.images?.[0],x?.images?.[1],x?.album?.image,x?.album?.images?.[0],
+      x?.track?.image,x?.track?.images?.[0],x?.track?.album?.image,x?.track?.album?.images?.[0],
+      x?.artist?.image,x?.artist?.images?.[0],x?.album?.images?.[0],x?.release?.image,x?.release?.images?.[0],
+      x?.cover?.url,x?.artwork?.url
+    ];
+    for(const c of candidates){
+      const values=Array.isArray(c)?c:[c];
+      for(const value of values){
+        const url=typeof value==="string"?value:(value?.url||value?.src||value?.["#text"]||value?.href||"");
+        if(typeof url==="string"&&/^https?:\/\//i.test(url))return url;
+      }
+    }
+    if(kind==="artist"){
+      const images=x?.image||x?.images;
+      if(Array.isArray(images)){
+        const url=images.map(v=>typeof v==="string"?v:(v?.url||v?.["#text"])).find(v=>/^https?:\/\//i.test(v||""));
+        if(url)return url;
+      }
+    }
+    return "";
+  }
+  async function hydrateItunesArtwork(scope){
+    if(!scope)return;
+    const nodes=[...scope.querySelectorAll('[data-itunes-art]')];
+    const apply=(node,url)=>{
+      if(!node.isConnected||!url)return false;
+      node.style.backgroundImage=`url("${url.replace(/["\\]/g,"")}")`;
+      node.style.backgroundSize="cover";node.style.backgroundPosition="center";
+      node.textContent="";node.classList.remove("lfmc-rank-placeholder");
+      node.dataset.artLoaded="true";return true;
+    };
+    const resolveFallback=async node=>{
+      if(!node.isConnected||node.dataset.itunesTried==="true")return;
+      node.dataset.itunesTried="true";
+      const type=node.dataset.artType||"track",name=node.dataset.artName||"",artist=node.dataset.artArtist||"";
+      if(!name)return;
+      try{const url=await itunesArtwork(type,name,artist);if(url&&node.isConnected)apply(node,url);}catch{}
+    };
+    for(const node of nodes){
+      if(!node.isConnected)break;
+      if(node.dataset.artLoaded==="true")continue;
+      const source=node.dataset.artUrl||"";
+      if(source){
+        const probe=new Image();
+        probe.onload=()=>{if(node.isConnected)apply(node,source);};
+        probe.onerror=()=>resolveFallback(node);
+        probe.src=source;
+      }else{
+        await resolveFallback(node);
+      }
+    }
+  }
+  const artworkChain=(type,name,artist)=>itunesArtwork(type,name,artist);
+  let spotifyQueue=Promise.resolve();
+  let spotifyBackoffUntil=0;
+  const spotifyGet=url=>{
+    const run=spotifyQueue.then(async()=>{await sleep(400);return Spicetify.CosmosAsync.get(url);});
+    spotifyQueue=run.catch(()=>{});
+    return run;
+  };
+  const spotifyArtCache=()=>{try{return JSON.parse(get(`${EXT}:spotifyArt`,"{}"))||{};}catch{return{};}};
+  async function spotifyArtwork(type,name,artist=""){
+    if(!name||!window.Spicetify?.CosmosAsync||Date.now()<spotifyBackoffUntil)return "";
+    const key=`${type}|${name}|${artist}`.toLowerCase();
+    const cache=spotifyArtCache();
+    if(cache[key]!==undefined)return cache[key];
+    const kind=type==="track"?"track":type==="album"?"album":"artist";
+    const q=kind==="artist"?`artist:"${name}"`:`${kind}:"${name}" artist:"${artist}"`;
+    try{
+      const res=await spotifyGet(`https://api.spotify.com/v1/search?type=${kind}&limit=1&q=${encodeURIComponent(q)}`);
+      const item=res?.[`${kind}s`]?.items?.[0];
+      const images=kind==="track"?item?.album?.images:item?.images;
+      const url=(images||[]).find(i=>(i.width||0)>=160)?.url||images?.[0]?.url||"";
+      logLine(`Artwork ${type} "${name}": ${url?"found on Spotify":"no match on Spotify"}`);
+      if(Object.keys(cache).length>500)cache={};
+      cache[key]=url;
+      set(`${EXT}:spotifyArt`,JSON.stringify(cache));
+      return url;
+    }catch(e){
+      if(e?.code===429)spotifyBackoffUntil=Date.now()+120000;
+      logLine(`Artwork ${type} "${name}": Spotify failed (${e?.message||e?.code||e}), using Last.fm`);
+      return "";
+    }
+  }
+  async function renderCharts(root){
+    const stats=spotifyStats();
+    const block=(items,kind)=>items.slice(0,5).map((x,i)=>`<div class="lfmc-row"><div class="lfmc-rank-number">${String(i+1).padStart(2,'0')}</div><div class="lfmc-rank-art lfmc-rank-placeholder" data-itunes-art="1" data-art-type="${kind}" data-art-name="${esc(x.title)}" data-art-artist="${esc(x.artist||'')}">♫</div><div class="lfmc-rowinfo"><div class="lfmc-rowtitle">${esc(x.title)}</div><div class="lfmc-rowartist">${esc(x.artist||'')} · ${fmt(x.count)} plays</div></div><div class="lfmc-muted">${(x.ms/3600000).toFixed(1)} hr</div></div>`).join('')||'<div class="lfmc-empty">Not enough local data yet.</div>';
+    root.innerHTML=`<div class="lfmc-tabtitle">Spotify charts</div><div class="lfmc-muted">These stats are about your Spotify only. Local tracking starts when Fmify is installed and active.</div><div class="lfmc-grid" style="margin:16px 0"><div class="lfmc-card"><div class="lfmc-label">Listening time</div><div class="lfmc-number">${(stats.total/3600000).toFixed(1)} hr</div></div><div class="lfmc-card"><div class="lfmc-label">Tracks played</div><div class="lfmc-number">${fmt(stats.history.length)}</div></div><div class="lfmc-card"><div class="lfmc-label">Artists</div><div class="lfmc-number">${fmt(stats.artists.length)}</div></div></div><div class="lfmc-section">Top tracks</div><div class="lfmc-list">${block(stats.tracks,'track')}</div><div class="lfmc-section">Top artists</div><div class="lfmc-list">${block(stats.artists,'artist')}</div><div class="lfmc-section">Top albums</div><div class="lfmc-list">${block(stats.albums,'album')}</div>`;
+    hydrateItunesArtwork(root);
+  }
+  async function renderServiceStats(root,service){
+    const title=service==='lastfm'?'Last.fm':service==='listenbrainz'?'ListenBrainz':'stats.fm';
+    root.innerHTML=`<div class="lfmc-tabtitle">${title} stats</div><div class="lfmc-muted">Stats shown here come from ${title}, not Fmify's Spotify local tracker.</div><div id="lfmc-service-stats"><div class="lfmc-empty">Loading ${title} data…</div></div>`;
+    const dest=root.querySelector('#lfmc-service-stats');
+    const card=(label,value,sub='')=>`<div class="lfmc-card"><div class="lfmc-label">${label}</div><div class="lfmc-number">${esc(value)}</div><div class="lfmc-muted">${esc(sub)}</div></div>`;
+    const itemOf=x=>x?.item||x?.track||x?.recording||x?.album||x?.release||x||{};
+    const titleOf=(x,kind)=>{
+      if(!x)return 'Unknown';
+      const v=kind==='artist'?(x.artist||x.item||x):(kind==='track'?(x.track||x.recording||x.item||x):(x.album||x.release||x.item||x));
+      if(kind==='artist')return v.name||v.artist_name||x.artist_name||x.artistName||'Unknown artist';
+      if(kind==='track')return v.name||v.track_name||v.title||x.track_name||x.title||'Unknown track';
+      return v.name||v.release_name||v.album_name||x.release_name||x.album_name||'Unknown album';
+    };
+    const countOf=x=>{
+      const v=x||{},raw=v.playcount??v.playCount??v.listen_count??v.listenCount??v.streams??v.stream_count??v.streamCount??v.totalStreams??v.count??v.plays??0;
+      return typeof raw==="object"?(raw.count??raw.total??raw.value??0):raw;
+    };
+    const artistOf=x=>{
+      const v=itemOf(x),a=v.artist||v.artists?.[0]||v.creator||v.album?.artist||v.release?.artist||x?.artist||x?.artists?.[0];
+      return typeof a==="string"?a:(a?.name||a?.artist_name||v.artist_name||v.artistName||x?.artist_name||x?.artistName||"");
+    };
+    const ranked=(label,items,kind)=>{
+      const rows=(items||[]).slice(0,5);
+      if(!rows.length)return `<section class="lfmc-rank-section"><div class="lfmc-section">${label}</div><div class="lfmc-empty">No data returned.</div></section>`;
+      const row=(x,i,featured)=>{
+        const name=titleOf(x,kind),count=fmt(countOf(x)),artist=kind==='artist'?'':artistOf(x);
+        const source=itemArtwork(x,kind);
+        return `<div class="lfmc-rank-item ${featured?'is-featured':''}"><div class="lfmc-rank-number">${String(i+1).padStart(2,'0')}</div><div class="lfmc-rank-art lfmc-rank-placeholder" data-itunes-art="1" data-art-type="${kind}" data-art-name="${esc(name)}" data-art-artist="${esc(artist)}" data-art-url="${esc(source)}">♫</div><div class="lfmc-rank-info"><div class="lfmc-rank-title">${esc(name)}</div>${artist?`<div class="lfmc-rank-sub">${esc(artist)}</div>`:''}<div class="lfmc-rank-count">${count} ${service==='lastfm'?'plays':service==='statsfm'?'streams':'listens'}</div></div></div>`;
+      };
+      return `<section class="lfmc-rank-section"><div class="lfmc-section">${label}</div><div class="lfmc-rank-list">${row(rows[0],0,true)}${rows.slice(1).map((x,i)=>row(x,i+1,false)).join('')}</div></section>`;
+    };
+    try{
+      if(service==='lastfm'){
+        if(!isConnected())throw new Error('Connect Last.fm in Settings first.');
+        const user=get(STORE.username);
+        const [info,loved,artists,tracks,albums]=await Promise.all([
+          api('user.getInfo',{user},false),api('user.getLovedTracks',{user,limit:'5'},false),
+          api('user.getTopArtists',{user,period:'overall',limit:'5'},false),
+          api('user.getTopTracks',{user,period:'overall',limit:'5'},false),
+          api('user.getTopAlbums',{user,period:'overall',limit:'5'},false)
+        ]);
+        const u=info.user||{};
+        dest.innerHTML=`<div class="lfmc-grid">${card('Total scrobbles',fmt(u.playcount),'Lifetime Last.fm plays')}${card('Loved tracks',fmt(loved.lovedtracks?.['@attr']?.total||loved.lovedtracks?.track?.length||0),'Last.fm library')}${card('Registered',u.registered?.['#text']?new Date(Number(u.registered['#text'])*1000).toLocaleDateString():'—','Account age')}</div><div class="lfmc-rank-sections">${ranked('Top artists',artists.topartists?.artist,'artist')}${ranked('Top tracks',tracks.toptracks?.track,'track')}${ranked('Top albums',albums.topalbums?.album,'album')}</div>`;hydrateItunesArtwork(dest);
+      }else if(service==='listenbrainz'){
+        if(!isLBConnected())throw new Error('Connect ListenBrainz in Settings first.');
+        const u=encodeURIComponent(get(STORE.lbUser));
+        const [a,t,r,listen]=await Promise.all([
+          lbPublic(`/1/stats/user/${u}/artists?range=all_time&count=5`),
+          lbPublic(`/1/stats/user/${u}/recordings?range=all_time&count=5`),
+          lbPublic(`/1/stats/user/${u}/releases?range=all_time&count=5`),
+          lbPublic(`/1/user/${u}/listens?count=1`)
+        ]);
+        dest.innerHTML=`<div class="lfmc-grid">${card('Username',get(STORE.lbUser),'ListenBrainz account')}${card('Recent listen',listen.payload?.listens?.[0]?.track_metadata?.track_name||'—','Latest available listen')}</div><div class="lfmc-rank-sections">${ranked('Top artists',a.payload?.artists,'artist')}${ranked('Top recordings',t.payload?.recordings,'track')}${ranked('Top releases',r.payload?.releases,'album')}</div>`;hydrateItunesArtwork(dest);
+      }else{
+        const token=get(STORE.statsfmToken);
+        if(!token)throw new Error('Import and validate your stats.fm access token in Settings first. Username-only access is no longer used.');
+        const statsGet=path=>statsFmRequest(path,token);
+        const listFrom=(x,keys=[])=>{
+          if(Array.isArray(x))return x;
+          for(const k of [...keys,'items','results','data','list']){
+            const v=x?.[k];
+            if(Array.isArray(v))return v;
+            if(v&&typeof v==='object'){
+              for(const kk of [...keys,'items','results','data','list'])if(Array.isArray(v[kk]))return v[kk];
+            }
+          }
+          return [];
+        };
+        const pickData=x=>x?.data||x?.payload||x?.result||x;
+        const me=await statsGet('/me');
+        const account=statsFmAccountFromMe(me);
+        if(!account)throw new Error('The stats.fm token was accepted but the account ID could not be read from /me.');
+        const id=account.id;
+        const profileRaw=me.user||me.profile||me.data?.user||me.data?.profile||me.data||me;
+        const getList=async(path,keys)=>{
+          const variants=['?range=ALL_TIME&limit=5','?range=all_time&limit=5','?timeRange=ALL_TIME&limit=5','?timeRange=all_time&limit=5','?limit=5',''];
+          for(const query of variants){
+            try{const data=await statsGet(path+query),arr=listFrom(data,keys);if(arr.length)return arr;}catch(e){if(query==='')logLine(`stats.fm ${path}: ${e.message}`);}
+          }
+          return [];
+        };
+        const [userData,artists,tracks,albums,genres,streamStats,recent,achievements]=await Promise.all([
+          statsGet(`/users/${encodeURIComponent(id)}`).catch(()=>({})),
+          getList(`/users/${encodeURIComponent(id)}/top/artists`,['artists','topArtists']),
+          getList(`/users/${encodeURIComponent(id)}/top/tracks`,['tracks','topTracks']),
+          getList(`/users/${encodeURIComponent(id)}/top/albums`,['albums','topAlbums']),
+          getList(`/users/${encodeURIComponent(id)}/top/genres`,['genres','topGenres']),
+          statsGet(`/users/${encodeURIComponent(id)}/streams/stats`).catch(()=>({})),
+          statsGet(`/users/${encodeURIComponent(id)}/streams/recent?limit=5`).catch(()=>statsGet(`/users/${encodeURIComponent(id)}/streams?limit=5`).catch(()=>({}))),
+          statsGet(`/users/${encodeURIComponent(id)}/achievements/completed`).catch(()=>({}))
+        ]);
+        const userObj=userData.user||userData.profile||pickData(userData)||profileRaw||{};
+        const statObj=pickData(streamStats)||{};
+        const deepNumber=(obj,keys,depth=0)=>{
+          if(!obj||typeof obj!=="object"||depth>4)return undefined;
+          for(const k of keys)if(typeof obj[k]==="number"&&Number.isFinite(obj[k]))return obj[k];
+          for(const v of Object.values(obj)){const n=deepNumber(v,keys,depth+1);if(n!==undefined)return n;}
+          return undefined;
+        };
+        const totalStreams=deepNumber(statObj,['totalStreams','total_streams','streamCount','stream_count','streams','total','count'])
+          ??deepNumber(userObj,['totalStreams','total_streams','streamCount','stream_count','streams']);
+        const totalMinutes=deepNumber(statObj,['totalMinutes','total_minutes','minutesListened','minutes_listened','listeningMinutes']);
+        const totalMs=deepNumber(statObj,['totalMs','total_ms','millisecondsListened','milliseconds_listened','durationMs','duration_ms']);
+        const totalHours=deepNumber(statObj,['totalHours','total_hours','hoursListened','hours_listened']);
+        const listeningLabel=totalMs!==undefined?`${(totalMs/3600000).toFixed(1)} hr`:totalMinutes!==undefined?`${(totalMinutes/60).toFixed(1)} hr`:totalHours!==undefined?`${totalHours.toFixed(1)} hr`:'—';
+        const profileName=userObj.displayName||userObj.display_name||userObj.username||userObj.name||profileRaw.displayName||profileRaw.username||get(`${EXT}:statsfmName`)||account.name;
+        const recentItems=listFrom(recent,['streams','listens','recentStreams']).slice(0,5);
+        const recentHtml=recentItems.length?`<section class="lfmc-rank-section"><div class="lfmc-section">Recent streams</div><div class="lfmc-rank-list">${recentItems.map((x,i)=>{
+          const v=x.track||x.item||x,trackName=v.name||v.trackName||v.track_name||'Unknown track',artistName=artistOf(v)||v.artistName||'',image=itemArtwork(v,'track');
+          const stamp=x.date||x.playedAt||x.played_at||x.timestamp||x.createdAt||'';
+          return `<div class="lfmc-rank-item"><div class="lfmc-rank-number">${String(i+1).padStart(2,'0')}</div><div class="lfmc-rank-art lfmc-rank-placeholder" data-itunes-art="1" data-art-type="track" data-art-name="${esc(trackName)}" data-art-artist="${esc(artistName)}" data-art-url="${esc(image)}">♫</div><div class="lfmc-rank-info"><div class="lfmc-rank-title">${esc(trackName)}</div><div class="lfmc-rank-sub">${esc(artistName)}</div><div class="lfmc-rank-count">${stamp?esc(new Date(typeof stamp==='number'?stamp*1000:stamp).toLocaleString()):'Recent listen'}</div></div></div>`;
+        }).join('')}</div></section>`:'';
+        const achievementCount=listFrom(achievements,['achievements','completed']).length;
+        const extraCards=achievementCount?card('Achievements',fmt(achievementCount),'Completed on stats.fm'):'';
+        const genreHtml=genres.length?`<section class="lfmc-rank-section"><div class="lfmc-section">Top genres</div><div class="lfmc-rank-list">${genres.slice(0,5).map((g,i)=>`<div class="lfmc-rank-item"><div class="lfmc-rank-number">${String(i+1).padStart(2,'0')}</div><div class="lfmc-rank-art lfmc-rank-placeholder">♫</div><div class="lfmc-rank-info"><div class="lfmc-rank-title">${esc(g.name||g.genre_name||g.tag||'Unknown genre')}</div><div class="lfmc-rank-count">${fmt(countOf(g))} streams</div></div></div>`).join('')}</div></section>`:'';
+        dest.innerHTML=`<div class="lfmc-grid">${card('Profile',profileName,'stats.fm account')}${card('Total streams',totalStreams===undefined?'—':fmt(totalStreams),'Stats.fm data')}${card('Listening time',listeningLabel,'Only when exposed by the API')}${extraCards}</div><div class="lfmc-rank-sections">${ranked('Top artists',artists,'artist')}${ranked('Top tracks',tracks,'track')}${ranked('Top albums',albums,'album')}${genreHtml}${recentHtml}</div>`;
+        hydrateItunesArtwork(dest);
+      }
+    }catch(e){
+      dest.innerHTML=`<div class="lfmc-empty">${esc(e.message)}<br><br>Some services restrict public profile data or require an account/API permission.</div>`;
+    }
+  }
   async function hateCurrent(){const t=state.track;if(!t||!isLBConnected())return;try{const msids=JSON.parse(get(`${EXT}:lbMsids`,"{}"));const msid=msids[t.uri];if(!msid)throw new Error("ListenBrainz recording ID unavailable yet; restart the track and try again");await lbRequest("/1/feedback/recording-feedback",{method:"POST",body:JSON.stringify({recording_msid:msid,score:-1})});status("Marked as disliked on ListenBrainz");}catch(e){status(e.message,true);}}
   function addLoveButton(){const h=document.createElement("button");h.id="lfmc-hate";h.title="Mark current track as disliked on ListenBrainz";h.textContent="−";h.style.cssText="position:fixed;bottom:105px;right:68px;z-index:9997;width:38px;height:38px;border:1px solid #555;border-radius:50%;background:#222;color:#aaa;font-size:22px;cursor:pointer;display:none";h.onclick=hateCurrent;document.body.appendChild(h);}
   function refreshDashboard(){const hate=document.getElementById("lfmc-hate");if(hate)hate.style.display=state.track&&isLBConnected()?"block":"none";if(document.getElementById("lfmc-overlay"))renderTab();}
